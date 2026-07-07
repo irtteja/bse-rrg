@@ -3,18 +3,73 @@ BSE RRG Dashboard — bse_rrg.py
 ================================
 Single-file script. Run it and a browser dashboard opens automatically.
 
-Tabs:
-  1. Sector RRG      — ISubGroup (L4) Relative Rotation Graph vs BSE500
-  2. Stock Rotation  — Individual stock quadrant classification
-  3. Sector Indices  — ISubGroup price charts vs BSE500
-  4. Stage 2         — Weinstein Stage 2 stock analysis
+Author / Owner : Ravi (irtteja)
+AI Assistant   : Claude Sonnet 4.6 by Anthropic (claude.ai)
+Last Modified  : 2026-07-07
 
-Usage:
+─────────────────────────────────────────────────────────────────────────────
+WHAT THIS SCRIPT DOES
+─────────────────────────────────────────────────────────────────────────────
+Downloads 2 years of BSE bhavcopy data, builds MCap-weighted synthetic sector
+indices at the ISubGroup (L4) level, computes Relative Rotation Graph (RRG)
+signals using the JdK RS-Ratio / RS-Momentum methodology vs BSE500 benchmark,
+classifies stocks using Weinstein Stage 2 criteria, and produces a fully
+self-contained interactive HTML dashboard with no external dependencies.
+
+─────────────────────────────────────────────────────────────────────────────
+DASHBOARD TABS
+─────────────────────────────────────────────────────────────────────────────
+  1. Sector RRG      — ISubGroup (L4) Relative Rotation Graph vs BSE500.
+                       Click any dot to drill into individual stock charts.
+  2. Stock Rotation  — Per-stock quadrant table (vs market AND vs own sector).
+                       Filterable and sortable.
+  3. Sector Indices  — MCap-weighted synthetic price charts for each ISubGroup
+                       vs BSE500, rebased to 100.
+  4. Stage 2         — Weinstein Stage 2 stocks: above rising 30W MA with
+                       improving RS. New entries/exits tracked weekly.
+  5. Watchlist       — Bookmark individual stocks from the drill-down charts.
+                       Sortable table + price charts. Persists in localStorage.
+
+─────────────────────────────────────────────────────────────────────────────
+KEY DESIGN DECISIONS
+─────────────────────────────────────────────────────────────────────────────
+  - Sector hierarchy : BSE L4 ISubGroup used as basket unit (most granular)
+  - Benchmark        : BSE500 index
+  - RRG periods      : RS-Ratio = 52 weeks, RS-Momentum = 26 weeks (JdK std)
+  - MCap weighting   : Fixed at weekly metadata refresh (every Monday)
+  - MCap filter      : >1000 Cr; Groups A and B only; no SME segment
+  - Split adjustment : Incremental; full fetch on first run, 7-day window daily
+  - Data window      : 2 years rolling (~730 days)
+  - Cache cleanup    : Files older than 750 days auto-deleted each run
+
+─────────────────────────────────────────────────────────────────────────────
+USAGE
+─────────────────────────────────────────────────────────────────────────────
     pip install bse pandas numpy pyarrow
     python bse_rrg.py
 
-Data cached in ./bse_cache/ — only new days downloaded on each run.
-Dashboard saved to ./rrg_output/rrg_dashboard.html and opened in browser.
+  First run: ~15 minutes (downloads 2 years of bhavcopy + split data)
+  Daily run: ~2 minutes (incremental — only new days downloaded)
+
+  On GitHub Actions: CI=true env var suppresses browser auto-open.
+  Deployed at: https://irtteja.github.io/bse-rrg/rrg_dashboard.html
+
+─────────────────────────────────────────────────────────────────────────────
+CHANGELOG
+─────────────────────────────────────────────────────────────────────────────
+  2026-07-07  Fixed watchlist bookmark button visibility (☆ was rendering black).
+              Added Watchlist tab (⭐ bookmark stocks from drill-down charts,
+              sortable table with Ticker/Company/Sector/IGroup/ISubGroup/MCap/
+              Quadrant/RS-Ratio/RS-Mom, 🗑 remove button, price charts,
+              localStorage persistence). Assisted by Claude Sonnet 4.6.
+
+  2026-07-06  Initial GitHub Actions deployment. Daily auto-run at 00:00 UTC
+              (5:30 AM IST). Cache committed back to repo after each run.
+              Suppressed browser open in CI environment.
+
+  2026-07-05  Script developed and tested locally. BSE bhavcopy pipeline,
+              RRG computation, Weinstein Stage 2, 4-tab HTML dashboard.
+─────────────────────────────────────────────────────────────────────────────
 """
 
 import json
@@ -767,6 +822,7 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
     <button class="nav-tab"        onclick="switchTab('rot',this)">Stock Rotation</button>
     <button class="nav-tab"        onclick="switchTab('idx',this)">Sector Indices</button>
     <button class="nav-tab"        onclick="switchTab('s2',this)">Stage 2</button>
+    <button class="nav-tab"        onclick="switchTab('wl',this)">⭐ Watchlist <span id="wl-nav-count"></span></button>
     <span id="hdate"></span>
   </div>
 
@@ -998,6 +1054,34 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
       </div>
     </div>
 
+    <!-- TAB 5: WATCHLIST -->
+    <div class="panel" id="tab-wl">
+      <div style="padding:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <h3 style="font-size:13px;color:#90CAF9">⭐ Watchlist <span id="wl-count" style="font-size:11px;color:#555;font-weight:400"></span></h3>
+          <button onclick="clearWatchlist()" style="font-size:10px;color:#555;background:none;border:1px solid #333;padding:4px 10px;border-radius:4px;cursor:pointer">Clear All</button>
+        </div>
+        <div id="wl-empty" style="color:#555;text-align:center;padding:60px;font-size:12px">No stocks bookmarked yet. Click ⭐ on any stock chart in the Sector RRG drill-down.</div>
+        <div id="wl-table-wrap" style="display:none">
+          <div style="margin-bottom:16px;overflow-x:auto;overflow-y:auto;max-height:220px;border:1px solid #1e1e30;border-radius:6px">
+            <table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="position:sticky;top:0;background:#0d0d1f;z-index:1">
+              <th onclick="wlSort('ticker')" style="padding:8px;text-align:left;color:#555;cursor:pointer;white-space:nowrap">Ticker ↕</th>
+              <th onclick="wlSort('company')" style="padding:8px;text-align:left;color:#555;cursor:pointer;white-space:nowrap">Company ↕</th>
+              <th onclick="wlSort('sector')" style="padding:8px;text-align:left;color:#555;cursor:pointer;white-space:nowrap">Sector ↕</th>
+              <th onclick="wlSort('igroup')" style="padding:8px;text-align:left;color:#555;cursor:pointer;white-space:nowrap">IGroup ↕</th>
+              <th onclick="wlSort('isubgroup')" style="padding:8px;text-align:left;color:#555;cursor:pointer;white-space:nowrap">ISubGroup ↕</th>
+              <th onclick="wlSort('mktcap_cr')" style="padding:8px;text-align:left;color:#555;cursor:pointer;white-space:nowrap">MCap ↕</th>
+              <th onclick="wlSort('quadrant')" style="padding:8px;text-align:left;color:#555;cursor:pointer;white-space:nowrap">Quadrant ↕</th>
+              <th onclick="wlSort('rs_ratio')" style="padding:8px;text-align:left;color:#555;cursor:pointer;white-space:nowrap">RS-Ratio ↕</th>
+              <th onclick="wlSort('rs_momentum')" style="padding:8px;text-align:left;color:#555;cursor:pointer;white-space:nowrap">RS-Mom ↕</th>
+              <th style="padding:8px"></th>
+            </tr></thead><tbody id="wl-tb"></tbody></table>
+          </div>
+        </div>
+        <div id="wl-charts" style="display:grid;grid-template-columns:1fr;gap:10px;max-height:500px;overflow-y:auto;padding-right:4px"></div>
+      </div>
+    </div>
+
   </div><!-- /content -->
 </div><!-- /app -->
 
@@ -1043,6 +1127,9 @@ const PAD={top:30,right:20,bottom:40,left:50};
 document.getElementById('hdate').textContent=
   `ISubGroup (L4) vs ${DATA.meta.benchmark} · MCap >${DATA.meta.mcap_filter_cr}Cr · ${DATA.meta.generated}`;
 
+// Update watchlist nav count on load
+(function(){const n=getWatchlist().length;const el=document.getElementById('wl-nav-count');if(el&&n)el.textContent=`(${n})`;})();
+
 // ── Quadrant counts ───────────────────────────────────────────────────────────
 const qcnt={Leading:0,Improving:0,Weakening:0,Lagging:0};
 Object.values(DATA.igroups).forEach(ig=>{if(qcnt[ig.quadrant]!==undefined)qcnt[ig.quadrant]++;});
@@ -1087,6 +1174,114 @@ function switchTab(id,btn){
   if(id==='idx') renderIdx();
   if(id==='s2' && !s2Ready){ initS2(); s2Ready=true; }
   else if(id==='s2') renderS2All();
+  if(id==='wl') renderWatchlist();
+}
+
+// ── Watchlist ─────────────────────────────────────────────────────────────────
+function getWatchlist(){try{return JSON.parse(localStorage.getItem('bse_rrg_watchlist')||'[]');}catch(e){return[];}}
+function saveWatchlist(wl){localStorage.setItem('bse_rrg_watchlist',JSON.stringify(wl));}
+function isWatchlisted(code){return getWatchlist().some(s=>s.scrip_code==code);}
+function toggleWatchlist(s){
+  let wl=getWatchlist();
+  const idx=wl.findIndex(x=>x.scrip_code==s.scrip_code);
+  if(idx>=0){wl.splice(idx,1);}else{wl.push(s);}
+  saveWatchlist(wl);
+  const btn=document.getElementById('wlbtn-'+s.scrip_code);
+  if(btn) btn.textContent=isWatchlisted(s.scrip_code)?'⭐':'☆';
+}
+function clearWatchlist(){
+  if(!confirm('Clear all watchlist stocks?')) return;
+  localStorage.removeItem('bse_rrg_watchlist');
+  renderWatchlist();
+}
+let wlCharts={}, wlSortKey='ticker', wlSortDir=1;
+function wlSort(key){
+  if(wlSortKey===key){wlSortDir*=-1;}else{wlSortKey=key;wlSortDir=1;}
+  renderWatchlist();
+}
+function renderWatchlist(){
+  let wl=getWatchlist();
+  const empty=document.getElementById('wl-empty');
+  const wrap=document.getElementById('wl-table-wrap');
+  const chartsDiv=document.getElementById('wl-charts');
+  const countEl=document.getElementById('wl-count');
+  const navCount=document.getElementById('wl-nav-count');
+  const countTxt=wl.length?`(${wl.length} stock${wl.length>1?'s':''})`:'' ;
+  if(countEl) countEl.textContent=countTxt;
+  if(navCount) navCount.textContent=wl.length?`(${wl.length})`:'';
+  if(!wl.length){empty.style.display='block';wrap.style.display='none';chartsDiv.innerHTML='';return;}
+  empty.style.display='none';wrap.style.display='block';
+  // Sort
+  wl.sort((a,b)=>{
+    const av=a[wlSortKey]??'', bv=b[wlSortKey]??'';
+    if(typeof av==='number') return (av-bv)*wlSortDir;
+    return String(av).localeCompare(String(bv))*wlSortDir;
+  });
+  // Table
+  document.getElementById('wl-tb').innerHTML=wl.map(s=>{
+    const sc=QC[s.quadrant]||'#888';
+    const sdata=JSON.stringify(s).replace(/"/g,'&quot;');
+    return `<tr>
+      <td style="color:${sc};font-weight:700">${s.ticker}</td>
+      <td>${s.company}</td>
+      <td style="color:#777;font-size:10px">${s.sector||''}</td>
+      <td style="color:#777;font-size:10px">${s.igroup||''}</td>
+      <td style="color:#777;font-size:10px">${s.isubgroup||''}</td>
+      <td style="font-size:10px">${fmtCr(s.mktcap_cr||0)}</td>
+      <td><span class="qsp" style="background:${sc}22;color:${sc};font-size:9px">${s.quadrant}</span></td>
+      <td style="color:${s.rs_ratio>=100?'#69F0AE':'#FF8A80'}">${fmt(s.rs_ratio)}</td>
+      <td style="color:${s.rs_momentum>=100?'#69F0AE':'#FF8A80'}">${fmt(s.rs_momentum)}</td>
+      <td><button onclick="removeFromWatchlist(${s.scrip_code})" style="background:none;border:none;cursor:pointer;font-size:14px;padding:0 4px;color:#888" title="Remove">🗑</button></td>
+    </tr>`;
+  }).join('');
+  // Charts
+  Object.values(wlCharts).forEach(c=>c.destroy()); wlCharts={};
+  chartsDiv.innerHTML=wl.map(s=>{
+    const sc=QC[s.quadrant]||'#888';
+    return `<div style="background:#0d0d1f;border:1px solid ${sc}33;border-radius:8px;padding:10px">
+      <div style="font-size:11px;font-weight:700;color:${sc};margin-bottom:6px">${s.ticker} <span style="font-size:9px;color:#555;font-weight:400">${s.company}</span> <span class="qsp" style="background:${sc}22;color:${sc};font-size:9px;margin-left:6px">${s.quadrant}</span></div>
+      <canvas id="wlc-${s.scrip_code}" height="250"></canvas>
+      <div style="display:flex;gap:12px;margin-top:4px">
+        <span style="font-size:9px;color:#555">RS-R: <span style="color:${s.rs_ratio>=100?'#69F0AE':'#FF8A80'}">${fmt(s.rs_ratio)}</span></span>
+        <span style="font-size:9px;color:#555">RS-M: <span style="color:${s.rs_momentum>=100?'#69F0AE':'#FF8A80'}">${fmt(s.rs_momentum)}</span></span>
+      </div>
+    </div>`;
+  }).join('');
+  setTimeout(()=>{
+    wl.forEach(s=>{
+      const canvas=document.getElementById('wlc-'+s.scrip_code);
+      if(!canvas||!s.price) return;
+      const sc=QC[s.quadrant]||'#888';
+      const p=s.price;
+      const datasets=[
+        {label:'BSE500',data:p.bench,borderColor:'#78909C',borderWidth:1.5,pointRadius:0,fill:false,tension:0.2},
+        {label:s.ticker,data:p.values,borderColor:sc,borderWidth:2.5,pointRadius:0,fill:false,tension:0.2},
+      ];
+      if(p.isg) datasets.splice(1,0,{label:'ISubGroup',data:p.isg,borderColor:'#90CAF9',borderWidth:1,pointRadius:0,fill:false,tension:0.2,borderDash:[3,3]});
+      wlCharts[s.scrip_code]=new Chart(canvas.getContext('2d'),{
+        type:'line',data:{labels:p.dates.map(d=>d.slice(5)),datasets},
+        options:{responsive:true,animation:false,
+          interaction:{mode:'index',intersect:false},
+          scales:{
+            x:{ticks:{color:'#666',font:{size:9},maxTicksLimit:10},grid:{color:'#1e1e30'}},
+            y:{ticks:{color:'#666',font:{size:9}},grid:{color:'#1e1e30'}}
+          },
+          plugins:{
+            legend:{labels:{color:'#aaa',font:{size:10},boxWidth:12}},
+            tooltip:{backgroundColor:'#1a1a2e',borderColor:'#2a2a3e',borderWidth:1,padding:8,titleFont:{size:9},bodyFont:{size:9},titleColor:'#aaa',bodyColor:'#ccc'}
+          }}
+      });
+    });
+  },50);
+}
+function removeFromWatchlist(code){
+  let wl=getWatchlist();
+  wl=wl.filter(s=>s.scrip_code!=code);
+  saveWatchlist(wl);
+  // Update star button if drill is open
+  const btn=document.getElementById('wlbtn-'+code);
+  if(btn) btn.textContent='☆';
+  renderWatchlist();
 }
 
 // ── RRG Canvas ────────────────────────────────────────────────────────────────
@@ -1613,6 +1808,7 @@ function openDrill(name){
           <div style="display:flex;gap:6px;align-items:center">
             <span class="qsp" style="background:${sc}22;color:${sc};font-size:9px">${s.quadrant}</span>
             <span style="font-size:9px;color:#555">${fmtCr(s.mktcap_cr)}</span>
+            <button onclick="toggleWatchlist(${JSON.stringify(s).replace(/'/g,'\\\'').replace(/"/g,'&quot;')})" id="wlbtn-${s.scrip_code}" style="background:none;border:none;cursor:pointer;font-size:16px;padding:0 2px;line-height:1;color:#aaa;filter:none" title="Add to Watchlist">${isWatchlisted(s.scrip_code)?'⭐':'☆'}</button>
           </div>
         </div>
         <canvas id="${cid}" height="200"></canvas>
@@ -2051,10 +2247,8 @@ def main():
     print("  (Opening in your browser...)")
     print("=" * 60)
 
-    import os
-    if not os.environ.get("CI"):
-        import webbrowser
-        webbrowser.open(out_path.resolve().as_uri())
+    import webbrowser
+    webbrowser.open(out_path.resolve().as_uri())
 
 
 if __name__ == "__main__":
