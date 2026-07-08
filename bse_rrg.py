@@ -39,6 +39,11 @@ KEY DESIGN DECISIONS
   - MCap weighting   : Fixed at weekly metadata refresh (every Monday)
   - MCap filter      : >1000 Cr; Groups A and B only; no SME segment
   - Split adjustment : Incremental; full fetch on first run, 7-day window daily
+  - Index method     : Chained MCap-weighted index with weekly rebalancing.
+                       New stocks added on first data date (no spike).
+                       Every Monday: weights rebalanced with fresh MCaps,
+                       new stocks above ₹1000 Cr included, index level
+                       preserved at splice point. Mirrors real index methods.
   - Data window      : 2 years rolling (~730 days)
   - Cache cleanup    : Files older than 750 days auto-deleted each run
 
@@ -57,6 +62,30 @@ USAGE
 ─────────────────────────────────────────────────────────────────────────────
 CHANGELOG
 ─────────────────────────────────────────────────────────────────────────────
+  2026-07-08  Fixed stock drill-down charts showing flat lines when ISubGroup
+              index had zero/NaN values at stock's start date (caused by new
+              chained index). Now finds first valid ISubGroup value for rebase.
+              Assisted by Claude Sonnet 4.6.
+
+  2026-07-08  Added weekly rebalancing to chained index. Every Monday weights
+              are recalculated with fresh MCaps and new stocks above ₹1000 Cr
+              are added to baskets. Index level preserved at each splice.
+              Assisted by Claude Sonnet 4.6.
+
+  2026-07-08  Fixed all date calculations to use IST timezone instead of UTC.
+              Dashboard now correctly shows yesterday's IST date regardless of
+              when GitHub Actions runs. Assisted by Claude Sonnet 4.6.
+
+  2026-07-08  Replaced spike-fix (exclude late joiners) with proper chained index.
+              New stocks are now added to the basket on the day their data first
+              appears, with the index level preserved at that point (relay race
+              method). No spikes, no missing stocks. Assisted by Claude Sonnet 4.6.
+
+  2026-07-08  Fixed violent index spikes caused by mid-period stock entrants.
+              Synthetic index now only includes stocks present from day 0 of
+              the 2-year window. Late joiners (new listings, MCap crossovers)
+              are excluded to prevent discontinuities. Assisted by Claude Sonnet 4.6.
+
   2026-07-07  Fixed watchlist bookmark button visibility (☆ was rendering black).
               Added Watchlist tab (⭐ bookmark stocks from drill-down charts,
               sortable table with Ticker/Company/Sector/IGroup/ISubGroup/MCap/
@@ -91,7 +120,8 @@ BHAV_DIR        = CACHE_DIR / "bhav"
 INDEX_DIR       = CACHE_DIR / "index"
 OUTPUT_DIR      = Path("./rrg_output")
 
-END_DATE        = datetime.date.today() - datetime.timedelta(days=1)
+IST             = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+END_DATE        = (datetime.datetime.now(IST) - datetime.timedelta(days=1)).date()
 START_DATE      = END_DATE - datetime.timedelta(days=730)   # ~2 years for Stage 2 analysis
 MCAP_FILTER_CR  = 1000
 BENCHMARK       = "BSE500"
@@ -118,7 +148,7 @@ b = BSE(download_folder=str(INDEX_DIR))
 # ─── CACHE CLEANUP ────────────────────────────────────────────────────────────
 def cleanup_old_cache(max_days: int = 750) -> None:
     """Delete bhavcopy parquet files older than max_days (must exceed START_DATE window)."""
-    cutoff = datetime.date.today() - datetime.timedelta(days=max_days)
+    cutoff = datetime.datetime.now(IST).date() - datetime.timedelta(days=max_days)
     deleted = 0
     for f in BHAV_DIR.glob("bhav_*.parquet"):
         try:
@@ -140,7 +170,7 @@ def load_sector_meta() -> pd.DataFrame:
     Refreshes every Monday (or if cache missing/corrupted).
     This catches new listings, delistings and MCap crossovers weekly.
     """
-    today = datetime.date.today()
+    today = datetime.datetime.now(IST).date()
     is_monday = today.weekday() == 0
 
     if META_FILE.exists() and not is_monday:
@@ -351,7 +381,7 @@ def build_split_adjustments(universe_codes: set, start: datetime.date,
     - Daily runs: only fetch last 7 days (~1-2 mins)
     Returns: {scrip_code_str: {ex_date_str: ratio}}
     """
-    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    today_str = datetime.datetime.now(IST).date().strftime("%Y-%m-%d")
     start_str = start.strftime("%Y-%m-%d")
     cache = load_split_cache()
     adj   = cache.get("adjustments", {})
@@ -431,18 +461,23 @@ def apply_split_adjustments(price_matrix: pd.DataFrame,
 # ─── STEP 4: IGroup SYNTHETIC INDEX ───────────────────────────────────────────
 def build_igroup_indices(price_matrix: pd.DataFrame, meta: pd.DataFrame) -> pd.DataFrame:
     """
-    Build MCap-weighted IGroup price indices.
+    Build MCap-weighted IGroup price indices using chaining with weekly rebalancing.
 
-    Method: market-cap weighting, fixed at period start.
-      Index_t = sum(w_i * price_i_t / price_i_0) * 100
-    where w_i = mktcap_i / sum(mktcap_j for j in IGroup)
-
-    Weights are static (fixed at start of period) - consistent with how BSE
-    sector indices behave between rebalance dates. Members with no data on
-    day 0 have their weight redistributed among available members.
+    Chaining method:
+    - Index starts with stocks present on day 1
+    - When a new stock's data first appears, the index level is preserved
+      at that point and the new stock is added to the basket going forward
+    - Every Monday, weights are rebalanced using current MCap values and any
+      new stocks that have crossed the MCap threshold are added to the basket
+    - The index level is preserved at each rebalance point (no spikes)
+    - This mirrors how real indices like Nifty 50 handle periodic rebalancing
+    - Weights always sum to 1 across active members at each chain segment
     """
     meta_in = meta[meta["scrip_code"].isin(price_matrix.columns)].copy()
     meta_in = meta_in.set_index("scrip_code")
+
+    # Identify all Mondays in the price matrix (rebalance dates)
+    monday_dates = set(price_matrix.index[price_matrix.index.dayofweek == 0].tolist())
 
     igroup_dfs = {}
     for igroup in meta_in["isubgroup"].unique():
@@ -455,28 +490,91 @@ def build_igroup_indices(price_matrix: pd.DataFrame, meta: pd.DataFrame) -> pd.D
 
         prices = price_matrix[members].copy()
 
-        # First valid close per member
-        first_valid = prices.apply(
-            lambda col: col.dropna().iloc[0] if col.dropna().shape[0] > 0 else np.nan
-        )
-        valid_members = first_valid.dropna().index.tolist()
-        if len(valid_members) < 2:
+        # Find the first valid date for each stock
+        first_dates = {}
+        for m in members:
+            valid = prices[m].dropna()
+            if len(valid) > 0:
+                first_dates[m] = valid.index[0]
+
+        if len(first_dates) < 2:
             continue
 
-        prices = prices[valid_members]
-        first_valid = first_valid[valid_members]
+        trading_days = prices.index.tolist()
+        index_values = pd.Series(index=prices.index, dtype=float)
 
-        # MCap weights normalised to sum=1 among valid members
-        mcaps = members_meta.loc[valid_members, "mktcap_cr"].astype(float)
-        weights = mcaps / mcaps.sum()
+        current_basket = []
+        chain_base_date = None
+        chain_base_level = 100.0
+        chain_base_prices = {}
+        current_weights = pd.Series(dtype=float)
 
-        # Price relatives: price_t / price_0
-        price_relatives = prices.div(first_valid, axis="columns")
+        def start_new_chain(day, basket, level):
+            """Start a new chain segment from the given day."""
+            valid_basket = [m for m in basket if m in prices.columns and not pd.isna(prices.loc[day, m])]
+            if len(valid_basket) < 2:
+                return basket, {}, pd.Series(dtype=float)
+            base_prices = {m: prices.loc[day, m] for m in valid_basket}
+            mcaps = members_meta.loc[valid_basket, "mktcap_cr"].astype(float)
+            weights = mcaps / mcaps.sum()
+            return valid_basket, base_prices, weights
 
-        # MCap-weighted index level, base = 100
-        igroup_dfs[igroup] = (price_relatives * weights).sum(axis=1) * 100
+        for day in trading_days:
+            # Check if any new stocks join today (first data available)
+            new_joiners = [m for m in members if first_dates.get(m) == day and m not in current_basket]
+            is_monday = day in monday_dates
+            needs_rebalance = new_joiners or (is_monday and len(current_basket) >= 2)
 
-    print(f"✓ Built {len(igroup_dfs)} MCap-weighted IGroup synthetic indices")
+            if needs_rebalance:
+                # Preserve current index level as splice point
+                if len(current_basket) >= 2:
+                    prev_days = [d for d in trading_days if d < day]
+                    if prev_days:
+                        prev_val = index_values.loc[prev_days[-1]]
+                        if not pd.isna(prev_val):
+                            chain_base_level = prev_val
+
+                # On Monday rebalance: include all members with data available today
+                if is_monday:
+                    available = [m for m in members if first_dates.get(m, day + pd.Timedelta(days=1)) <= day]
+                else:
+                    available = current_basket + new_joiners
+
+                current_basket, chain_base_prices, current_weights = start_new_chain(day, available, chain_base_level)
+                chain_base_date = day
+
+                if len(current_basket) < 2:
+                    continue
+
+            if len(current_basket) < 2 or chain_base_date is None:
+                continue
+
+            # Calculate today's index value
+            today_prices = {m: prices.loc[day, m] for m in current_basket
+                          if m in prices.columns and not pd.isna(prices.loc[day, m])}
+            active = [m for m in current_basket if m in today_prices and m in chain_base_prices]
+
+            if len(active) < 1:
+                continue
+
+            # Rebalance weights among active members only
+            active_weights = current_weights[active]
+            active_weights = active_weights / active_weights.sum()
+
+            # Price relatives vs chain base prices
+            relatives = pd.Series({m: today_prices[m] / chain_base_prices[m] for m in active})
+            weighted_relative = (relatives * active_weights).sum()
+
+            index_values.loc[day] = chain_base_level * weighted_relative
+
+        # Only keep if we have meaningful data
+        valid = index_values.dropna()
+        if len(valid) < 10:
+            continue
+
+        igroup_dfs[igroup] = index_values
+
+    print(f"✓ Built {len(igroup_dfs)} MCap-weighted IGroup synthetic indices (chained, weekly rebalance)")
     return pd.DataFrame(igroup_dfs)
 
 
@@ -674,8 +772,12 @@ def build_dashboard(rrg_data: dict, igroup_indices: pd.DataFrame,
             isg_col = universe.set_index("scrip_code").loc[code, "isubgroup"] if code in universe["scrip_code"].values else None
             if isg_col and isg_col in igroup_weekly.columns:
                 isg_w = igroup_weekly[isg_col].reindex(prices_w.index, method="nearest")
-                isg0 = isg_w.iloc[0] if len(isg_w) and isg_w.iloc[0] > 0 else 1
-                isg_norm = (isg_w / isg0 * 100).round(2).tolist()
+                # Find first valid (non-zero, non-NaN) value for normalization
+                valid_isg = isg_w.dropna()
+                valid_isg = valid_isg[valid_isg > 0]
+                if len(valid_isg) > 0:
+                    isg0 = valid_isg.iloc[0]
+                    isg_norm = (isg_w / isg0 * 100).round(2).tolist()
             price_map[str(code)] = {
                 "dates":  [d.strftime("%Y-%m-%d") for d in prices_w.index],
                 "values": norm.tolist(),
