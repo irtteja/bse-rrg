@@ -2,7 +2,8 @@ name: Build and Deploy RRG Dashboard
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # 5:30 AM IST, daily
+    - cron: '30 2 * * *'  # 8:00 AM IST, daily
+    - cron: '30 3 * * *'  # 9:00 AM IST, backup
   workflow_dispatch:
 
 permissions:
