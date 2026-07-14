@@ -991,18 +991,36 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
 
     <!-- TAB 2: STOCK ROTATION -->
     <div class="panel" id="tab-rot">
-      <div class="toolbar">
+      <div class="toolbar" style="flex-wrap:nowrap">
         <label>IGroup:</label>
-        <select id="rot-ig" onchange="onRotIGChange()"><option value="">All IGroups</option></select>
+        <select id="rot-ig" onchange="onRotIGChange()" style="max-width:160px"><option value="">All IGroups</option></select>
         <label>ISubGroup:</label>
-        <select id="rot-sg" onchange="onRotSGChange()"><option value="">All</option></select>
+        <select id="rot-sg" onchange="onRotSGChange()" style="max-width:160px"><option value="">All</option></select>
         <label>Search:</label>
-        <input class="srch" id="rot-srch" placeholder="Ticker / company…" oninput="renderRot()" style="width:180px">
-        <label style="margin-left:auto">Quadrant vs:</label>
+        <input class="srch" id="rot-srch" placeholder="Ticker / company…" oninput="renderRot()" style="width:140px">
+        <label style="margin-left:auto">Q vs:</label>
         <select id="rot-mode" onchange="renderRot()">
-          <option value="bse500">BSE500 (Benchmark)</option>
-          <option value="sector">Own ISubGroup (Sector)</option>
-          <option value="both">Both (BSE500 AND Sector)</option>
+          <option value="bse500">BSE500</option>
+          <option value="sector">Sector</option>
+          <option value="both">Both</option>
+        </select>
+        <label>52W:</label>
+        <select id="rot-view" onchange="renderRot()">
+          <option value="quadrant">— None —</option>
+          <optgroup label="📈 Near 52W High">
+            <option value="high52_5">5% of 52W High</option>
+            <option value="high52_10">10% of 52W High</option>
+            <option value="high52_15">15% of 52W High</option>
+            <option value="high52_20">20% of 52W High</option>
+            <option value="high52_100">All (any distance)</option>
+          </optgroup>
+          <optgroup label="📉 Near 52W Low">
+            <option value="low52_5">5% of 52W Low</option>
+            <option value="low52_10">10% of 52W Low</option>
+            <option value="low52_15">15% of 52W Low</option>
+            <option value="low52_20">20% of 52W Low</option>
+            <option value="low52_100">All (any distance)</option>
+          </optgroup>
         </select>
       </div>
       <div style="flex:1;overflow-y:auto;padding:16px">
@@ -1019,6 +1037,7 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
                 <th onclick="rotSort('leading','rs_ratio')">RS-R</th>
                 <th onclick="rotSort('leading','rs_momentum')">RS-M</th>
                 <th>SG-Q</th>
+                <th id="rot-52w-hdr-leading" style="display:none;white-space:nowrap;cursor:pointer" onclick="rotSort('leading','pct52')">% 52W</th>
               </tr></thead><tbody id="rot-leading-tb"></tbody></table>
             </div>
           </div>
@@ -1034,6 +1053,7 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
                 <th onclick="rotSort('improving','rs_ratio')">RS-R</th>
                 <th onclick="rotSort('improving','rs_momentum')">RS-M</th>
                 <th>SG-Q</th>
+                <th id="rot-52w-hdr-improving" style="display:none;white-space:nowrap;cursor:pointer" onclick="rotSort('improving','pct52')">% 52W</th>
               </tr></thead><tbody id="rot-improving-tb"></tbody></table>
             </div>
           </div>
@@ -1049,6 +1069,7 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
                 <th onclick="rotSort('weakening','rs_ratio')">RS-R</th>
                 <th onclick="rotSort('weakening','rs_momentum')">RS-M</th>
                 <th>SG-Q</th>
+                <th id="rot-52w-hdr-weakening" style="display:none;white-space:nowrap;cursor:pointer" onclick="rotSort('weakening','pct52')">% 52W</th>
               </tr></thead><tbody id="rot-weakening-tb"></tbody></table>
             </div>
           </div>
@@ -1064,6 +1085,7 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
                 <th onclick="rotSort('lagging','rs_ratio')">RS-R</th>
                 <th onclick="rotSort('lagging','rs_momentum')">RS-M</th>
                 <th>SG-Q</th>
+                <th id="rot-52w-hdr-lagging" style="display:none;white-space:nowrap;cursor:pointer" onclick="rotSort('lagging','pct52')">% 52W</th>
               </tr></thead><tbody id="rot-lagging-tb"></tbody></table>
             </div>
           </div>
@@ -1183,6 +1205,7 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
         <div id="wl-charts" style="display:grid;grid-template-columns:1fr;gap:10px;max-height:500px;overflow-y:auto;padding-right:4px"></div>
       </div>
     </div>
+
 
   </div><!-- /content -->
 </div><!-- /app -->
@@ -1731,6 +1754,37 @@ function renderRot(){
   const q=(document.getElementById('rot-srch').value||'').toLowerCase();
   const mode=document.getElementById('rot-mode')?.value||'bse500';
   const igf=document.getElementById('rot-ig').value;
+  const view=document.getElementById('rot-view')?.value||'quadrant';
+
+  // Show/hide 52W column headers across all 4 tables
+  const show52=view!=='quadrant';
+  const isHigh52=view.startsWith('high52');
+  const pctLimit52=show52?parseFloat(view.split('_')[1]||'100'):100;
+  ['leading','improving','weakening','lagging'].forEach(q=>{
+    const hdr=document.getElementById('rot-52w-hdr-'+q);
+    if(hdr){
+      hdr.style.display=show52?'':'none';
+      hdr.textContent=isHigh52?'% from 52W High':'% above 52W Low';
+    }
+  });
+
+  // Pre-compute 52W values per scrip_code for quick lookup
+  let pct52Map={};
+  if(show52){
+    (DATA.stocks||[]).forEach(s=>{
+      if(!s.price||!s.price.values||s.price.values.length<2) return;
+      const vals=s.price.values.slice(-52);
+      const current=s.price.values[s.price.values.length-1];
+      if(isHigh52){
+        const high=Math.max(...vals);
+        if(high>0) pct52Map[s.scrip_code]=parseFloat((((high-current)/high)*100).toFixed(1));
+      } else {
+        const low=Math.min(...vals);
+        if(low>0) pct52Map[s.scrip_code]=parseFloat((((current-low)/low)*100).toFixed(1));
+      }
+    });
+  }
+
   let stocks=DATA.stocks||[];
   if(igf) stocks=stocks.filter(s=>s.igroup===igf);
   if(sgf) stocks=stocks.filter(s=>s.isubgroup===sgf);
@@ -1745,7 +1799,12 @@ function renderRot(){
       if(mode==='sector') return (s.quadrant_sg||'')=== Quad;
       if(mode==='both')   return (s.quadrant||'')=== Quad && (s.quadrant_sg||'')=== Quad;
       return (s.quadrant||'')=== Quad;
-    }).sort((a,b)=>{
+    }).filter(s=>{
+      if(!show52) return true;
+      const p=pct52Map[s.scrip_code];
+      return p!=null && p<=pctLimit52;
+    }).map(s=>({...s, pct52:pct52Map[s.scrip_code]??null}))
+    .sort((a,b)=>{
       const av=a[k]??0, bv=b[k]??0;
       return typeof av==='number'?d*(bv-av):d*String(av).localeCompare(String(bv));
     });
@@ -1760,6 +1819,17 @@ function renderRot(){
       const sgBadge=s.quadrant_sg
         ?`<span class="qsp" style="background:${sgc}22;color:${sgc}">${s.quadrant_sg[0]}</span>`
         :'<span style="color:#333">—</span>';
+      const pct52val=s.pct52??null;
+      const pct52cell=show52?(()=>{
+        if(pct52val==null) return '<td style="padding:5px 8px;color:#333;text-align:right">—</td>';
+        const pctColor=isHigh52
+          ?(pct52val<=3?'#FFD700':pct52val<=7?'#69F0AE':'#aaa')
+          :(pct52val<=3?'#FFD700':pct52val<=10?'#69F0AE':'#aaa');
+        const label=isHigh52
+          ?(pct52val===0?'AT HIGH':'-'+pct52val+'%')
+          :(pct52val===0?'AT LOW':'+'+pct52val+'%');
+        return `<td style="padding:5px 8px;color:${pctColor};text-align:right;font-weight:600;white-space:nowrap">${label}</td>`;
+      })():'';
       return `<tr style="background:${i%2===0?'#0a0a1a':'#0e0e22'}">
         <td style="padding:5px 8px;color:#90CAF9;font-weight:600">${s.ticker}</td>
         <td style="padding:5px 8px;color:#ccc;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.company}</td>
@@ -1769,6 +1839,7 @@ function renderRot(){
         <td style="padding:5px 8px;text-align:right;color:${s.rs_ratio>=100?'#69F0AE':'#FF8A80'}">${fmt(s.rs_ratio)}</td>
         <td style="padding:5px 8px;text-align:right;color:${s.rs_momentum>=100?'#69F0AE':'#FF8A80'}">${fmt(s.rs_momentum)}</td>
         <td style="padding:5px 8px">${sgBadge}</td>
+        ${pct52cell}
       </tr>`;
     }).join('')||`<tr><td colspan="8" style="padding:16px;text-align:center;color:#444">No stocks.</td></tr>`;
   });
