@@ -15,7 +15,6 @@
       content="default-src  https://*.googlesyndication.com  'self';  img-src *.gstatic.com *.google.com 'self' data: chrome-extension-resource storage.googleapis.com pagead2.googlesyndication.com;script-src 'strict-dynamic' 'self' 'nonce-appcomponents123456789'; connect-src * data; style-src 'nonce-appcomponents123456789'  'self' data: chrome-extension-resource:  pagead2.googlesyndication.com     storage.googleapis.com googleads.g.doubleclick.net ajax.googleapis.com; frame-src 'self' data: chrome-extension-resource:;font-src *.gstatic.com *.google.com 'self'      data: chrome-extension-resource: *.gstatic.com *.google.com fonts.googleapis.com; frame-ancestors 'self';      object-src 'none';              media-src * data; base-uri 'self'; "
     /> -->
     <link rel="icon" type="image/x-icon" href="/assets/includenew/images/bselogo.png">
-
     <link rel="dns-prefetch" href="https://api.bseindia.com">
     <link rel="dns-prefetch" href="https://cdn-pub.sentifi.com">
     <link rel="dns-prefetch" href="https://tpc.googlesyndication.com">
@@ -68,10 +67,10 @@
     }
   };
   documentElement.addEventListener('load', listener, true);
-})();</script><link rel="stylesheet" href="/assets/includenew/css/styles-2TUKSKS7.css" media="print" ngcspmedia="all"><noscript><link rel="stylesheet" href="styles-2TUKSKS7.css"></noscript></head>
+})();</script><link rel="stylesheet" href="/assets/includenew/css/styles-JOCCDOW5.css" media="print" ngcspmedia="all"><noscript><link rel="stylesheet" href="styles-JOCCDOW5.css"></noscript></head>
   <body>
     <app ngcspnonce="appcomponents123456789"></app>
     <app-root></app-root>
-  <link rel="modulepreload" href="/assets/includenew/js/chunk-DEO5VB42.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-J7OXOG5J.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-KHBHJHIM.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-5QRKRZMS.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-SPYPZQFF.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-MFFLFG5Q.js"><script src="/assets/includenew/js/polyfills-MH2GNY63.js" type="module" nonce="appcomponents123456789"></script><script src="/assets/includenew/js/scripts-DS3I3X7Y.js" defer="" nonce="appcomponents123456789"></script><script src="/assets/includenew/js/main-BMOJNZRT.js" type="module" nonce="appcomponents123456789"></script>
+  <link rel="modulepreload" href="/assets/includenew/js/chunk-BGDMHD4T.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-J7OXOG5J.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-KHBHJHIM.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-5QRKRZMS.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-SPYPZQFF.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-MFFLFG5Q.js"><script src="/assets/includenew/js/polyfills-MH2GNY63.js" type="module" nonce="appcomponents123456789"></script><script src="/assets/includenew/js/scripts-DS3I3X7Y.js" defer="" nonce="appcomponents123456789"></script><script src="/assets/includenew/js/main-G3JIW4M6.js" type="module" nonce="appcomponents123456789"></script>
 
 </body></html>
