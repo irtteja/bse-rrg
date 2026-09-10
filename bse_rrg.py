@@ -791,6 +791,111 @@ def build_dashboard(rrg_data: dict, igroup_indices: pd.DataFrame,
         data_obj["stocks"] = stocks_list
 
     data_obj["stage2"] = stage2_data
+
+    # ── Rotation Tracker ──────────────────────────────────────────────────────
+    # Compare last day vs 5 trading days ago to detect changes
+    LOOKBACK = 5   # days back for quadrant/RS-Mom change detection
+    tracker_rows = []
+    for ig, df in rrg_data.items():
+        if df.empty or len(df) < 2:
+            continue
+        last      = df.iloc[-1]
+        prev      = df.iloc[-min(LOOKBACK, len(df)-1)]
+        rs_r_now  = round(float(last["rs_ratio"]),    2)
+        rs_m_now  = round(float(last["rs_momentum"]), 2)
+        rs_r_prev = round(float(prev["rs_ratio"]),    2)
+        rs_m_prev = round(float(prev["rs_momentum"]), 2)
+        q_now     = get_quadrant(rs_r_now, rs_m_now)
+        q_prev    = get_quadrant(rs_r_prev, rs_m_prev)
+
+        # Days in current quadrant (count back from today)
+        days_in_q = 0
+        for i in range(len(df)-1, -1, -1):
+            r = df.iloc[i]
+            if get_quadrant(r["rs_ratio"], r["rs_momentum"]) == q_now:
+                days_in_q += 1
+            else:
+                break
+
+        # Tail direction: compare last 3 days of RS-Ratio
+        if len(df) >= 3:
+            tail_vals = df["rs_ratio"].iloc[-3:].values
+            slope = tail_vals[-1] - tail_vals[0]
+            if slope > 0.05:
+                tail = "Clockwise"
+            elif slope < -0.05:
+                tail = "Reversing"
+            else:
+                tail = "Flat"
+        else:
+            tail = "Flat"
+
+        # Tail 5 days ago (to detect fresh tail turns)
+        if len(df) >= LOOKBACK + 3:
+            tail_prev_vals = df["rs_ratio"].iloc[-(LOOKBACK+3):-(LOOKBACK)].values
+            slope_prev = tail_prev_vals[-1] - tail_prev_vals[0]
+            tail_prev = "Clockwise" if slope_prev > 0.05 else ("Reversing" if slope_prev < -0.05 else "Flat")
+        else:
+            tail_prev = tail
+
+        # Alert logic
+        alerts = []
+
+        # 1. Quadrant change in last 5 days
+        if q_now != q_prev:
+            alerts.append(f"{q_prev} → {q_now}")
+
+        # 2. RS-Mom crossing 100
+        if rs_m_prev < 100 <= rs_m_now:
+            alerts.append("RS-Mom crossed 100 ↑")
+        if rs_m_prev >= 100 > rs_m_now:
+            alerts.append("RS-Mom crossed 100 ↓")
+
+        # 3. Fresh tail turn clockwise (was not clockwise 5 days ago)
+        if tail == "Clockwise" and tail_prev != "Clockwise":
+            alerts.append("Tail turning clockwise")
+
+        # 4. Conflict: bullish quadrant but tail already reversing
+        if q_now in ("Leading", "Improving") and tail == "Reversing":
+            alerts.append("⚠ Tail reversing")
+
+        # 5. Aging Leading with reversing tail — Weakening setup forming
+        if q_now == "Leading" and tail == "Reversing" and days_in_q > 10:
+            alerts.append("⚠ Momentum fading")
+
+        # 6. Improving + Reversing — could slip back to Lagging
+        if q_now == "Improving" and tail == "Reversing":
+            alerts.append("⚠ Fading before breakout")
+
+        # 7. Lagging + Clockwise — potential Improving candidate
+        if q_now == "Lagging" and tail == "Clockwise":
+            alerts.append("👀 Turning up")
+
+        # 8. Weakening + Clockwise — possible recovery back to Leading
+        if q_now == "Weakening" and tail == "Clockwise":
+            alerts.append("↩ Possible recovery")
+
+        sector  = meta_lookup.loc[ig, "sector"]  if ig in meta_lookup.index else ""
+        igrp    = meta_lookup.loc[ig, "igroup"]  if ig in meta_lookup.index else ""
+
+        tracker_rows.append({
+            "isubgroup":  ig,
+            "igroup":     igrp,
+            "sector":     sector,
+            "quadrant":   q_now,
+            "q_prev":     q_prev,
+            "tail":       tail,
+            "rs_ratio":   rs_r_now,
+            "rs_momentum": rs_m_now,
+            "days_in_q":  days_in_q,
+            "alerts":     alerts,
+        })
+
+    # Sort: alerted first, then by quadrant priority
+    Q_ORDER = {"Improving": 0, "Leading": 1, "Weakening": 2, "Lagging": 3}
+    tracker_rows.sort(key=lambda x: (0 if x["alerts"] else 1, Q_ORDER.get(x["quadrant"], 9)))
+    data_obj["tracker"] = tracker_rows
+
     data_json = json.dumps(data_obj)
 
     # HTML template — using % substitution to avoid f-string brace escaping
@@ -925,6 +1030,7 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
     <button class="nav-tab"        onclick="switchTab('idx',this)">Sector Indices</button>
     <button class="nav-tab"        onclick="switchTab('s2',this)">Stage 2</button>
     <button class="nav-tab"        onclick="switchTab('wl',this)">⭐ Watchlist <span id="wl-nav-count"></span></button>
+    <button class="nav-tab"        onclick="switchTab('trk',this)">🔄 Tracker</button>
     <span id="hdate"></span>
   </div>
 
@@ -1207,6 +1313,52 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
     </div>
 
 
+    <!-- TAB 6: ROTATION TRACKER -->
+    <div class="panel" id="tab-trk">
+      <div class="toolbar" style="flex-wrap:nowrap">
+        <label>Quadrant:</label>
+        <select id="trk-q" onchange="renderTracker()">
+          <option value="">All</option>
+          <option value="Improving">Improving</option>
+          <option value="Leading">Leading</option>
+          <option value="Weakening">Weakening</option>
+          <option value="Lagging">Lagging</option>
+        </select>
+        <label>IGroup:</label>
+        <select id="trk-ig" onchange="onTrkIGChange()" style="max-width:180px"><option value="">All IGroups</option></select>
+        <label>ISubGroup:</label>
+        <select id="trk-sg" onchange="renderTracker()" style="max-width:180px"><option value="">All</option></select>
+        <select id="trk-alert" onchange="renderTracker()">
+          <option value="">All</option>
+          <option value="alert">Alerts only</option>
+        </select>
+        <input class="srch" id="trk-srch" placeholder="Search…" oninput="renderTracker()" style="width:120px">
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:16px">
+        <div id="trk-alerts-wrap" style="margin-bottom:20px">
+          <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Today\'s alerts</div>
+          <div id="trk-alerts"></div>
+        </div>
+        <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">All ISubGroups</div>
+        <div class="tw">
+          <table id="trk-table">
+            <thead><tr>
+              <th onclick="trkSort(\'isubgroup\')">ISubGroup</th>
+              <th onclick="trkSort(\'igroup\')">IGroup</th>
+              <th onclick="trkSort(\'quadrant\')">Quadrant</th>
+              <th onclick="trkSort(\'tail\')">Tail</th>
+              <th onclick="trkSort(\'rs_ratio\')">RS-Ratio</th>
+              <th onclick="trkSort(\'rs_momentum\')">RS-Mom</th>
+              <th onclick="trkSort(\'days_in_q\')">Days in Q</th>
+              <th>Alerts</th>
+            </tr></thead>
+            <tbody id="trk-tb"></tbody>
+          </table>
+        </div>
+        <div class="cnt" id="trk-cnt"></div>
+      </div>
+    </div>
+
   </div><!-- /content -->
 </div><!-- /app -->
 
@@ -1298,6 +1450,7 @@ function switchTab(id,btn){
   if(id==='rot') renderRot();
   if(id==='idx') renderIdx();
   if(id==='s2' && !s2Ready){ initS2(); s2Ready=true; }
+  if(id==='trk') renderTracker();
   else if(id==='s2') renderS2All();
   if(id==='wl') renderWatchlist();
 }
@@ -2167,6 +2320,127 @@ function s2Sort(tbl,k){
 window.addEventListener('resize', drawRRG);
 drawRRG();
 renderRot();
+
+// ── Rotation Tracker ──────────────────────────────────────────────────────────
+const TAIL_ARROW={Clockwise:'↗',Reversing:'↙',Flat:'→'};
+const TAIL_COLOR={Clockwise:'#00C853',Reversing:'#D50000',Flat:'#555'};
+let trkSortKey='alerts_len', trkSortDir=-1;
+
+// Populate IGroup dropdown from tracker data
+(function(){
+  const igs=[...new Set((DATA.tracker||[]).map(r=>r.igroup).filter(Boolean))].sort();
+  const el=document.getElementById('trk-ig');
+  if(el) igs.forEach(g=>{const o=document.createElement('option');o.value=g;o.textContent=g;el.appendChild(o);});
+})();
+
+function onTrkIGChange(){
+  const ig=document.getElementById('trk-ig').value;
+  const sgSel=document.getElementById('trk-sg');
+  sgSel.innerHTML='<option value="">All</option>';
+  if(ig){
+    const sgs=[...new Set((DATA.tracker||[]).filter(r=>r.igroup===ig).map(r=>r.isubgroup).filter(Boolean))].sort();
+    sgs.forEach(s=>{const o=document.createElement('option');o.value=s;o.textContent=s;sgSel.appendChild(o);});
+  } else {
+    // All ISubGroups
+    const sgs=[...new Set((DATA.tracker||[]).map(r=>r.isubgroup).filter(Boolean))].sort();
+    sgs.forEach(s=>{const o=document.createElement('option');o.value=s;o.textContent=s;sgSel.appendChild(o);});
+  }
+  renderTracker();
+}
+
+function trkSort(key){
+  if(trkSortKey===key) trkSortDir*=-1; else {trkSortKey=key; trkSortDir=-1;}
+  renderTracker();
+}
+
+function renderTracker(){
+  const qf   = document.getElementById('trk-q').value;
+  const igf  = document.getElementById('trk-ig').value;
+  const sgf  = document.getElementById('trk-sg').value;
+  const af   = document.getElementById('trk-alert').value;
+  const srch = (document.getElementById('trk-srch').value||'').toLowerCase();
+  let rows = (DATA.tracker||[]).filter(r=>{
+    if(qf  && r.quadrant!==qf) return false;
+    if(igf && r.igroup!==igf)  return false;
+    if(sgf && r.isubgroup!==sgf) return false;
+    if(af==='alert' && !r.alerts.length) return false;
+    if(srch && !r.isubgroup.toLowerCase().includes(srch) && !r.igroup.toLowerCase().includes(srch)) return false;
+    return true;
+  });
+
+  // Sort
+  rows.sort((a,b)=>{
+    let av=a[trkSortKey], bv=b[trkSortKey];
+    if(trkSortKey==='alerts_len'){av=a.alerts.length; bv=b.alerts.length;}
+    if(typeof av==='string') return trkSortDir*(av.localeCompare(bv));
+    return trkSortDir*((av||0)-(bv||0));
+  });
+
+  // Badge logic — based on alert content, not just quadrant
+  function trkBadge(r){
+    const a = r.alerts.join(' ');
+    const hasWarning = a.includes('⚠');
+    const hasConflict = a.includes('⚠ Tail reversing') || a.includes('⚠ Fading') || a.includes('⚠ Momentum');
+    if(hasConflict)
+      return `<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:#D5000022;color:#D50000;font-weight:600">⚠ Caution</span>`;
+    if(a.includes('👀 Turning up'))
+      return `<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:#2962FF22;color:#90CAF9;font-weight:600">👀 Watch</span>`;
+    if(a.includes('↩ Possible recovery'))
+      return `<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:#FF6D0022;color:#FF6D00;font-weight:600">↩ Recovery?</span>`;
+    if((r.quadrant==='Improving'||r.quadrant==='Leading') && r.days_in_q<=5 && !hasWarning)
+      return `<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:#00C85322;color:#00C853;font-weight:600">Early entry</span>`;
+    if(r.quadrant==='Improving'||r.quadrant==='Leading')
+      return `<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:#00C85322;color:#00C853;font-weight:600">Confirmed</span>`;
+    if(r.quadrant==='Weakening')
+      return `<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:#FF6D0022;color:#FF6D00;font-weight:600">Watch</span>`;
+    return `<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:#D5000022;color:#D50000;font-weight:600">Avoid</span>`;
+  }
+
+  // Alerts section — split into bullish / bearish groups
+  const alertRows = (DATA.tracker||[]).filter(r=>r.alerts.length>0);
+  const alertEl = document.getElementById('trk-alerts');
+  if(!alertRows.length){
+    alertEl.innerHTML='<div style="color:#444;font-size:12px;padding:8px 0">No alerts today.</div>';
+  } else {
+    const bullish = alertRows.filter(r=>r.quadrant==='Improving'||r.quadrant==='Leading');
+    const bearish  = alertRows.filter(r=>r.quadrant==='Weakening'||r.quadrant==='Lagging');
+    const mkRow = r => {
+      const qc = QC[r.quadrant]||'#888';
+      return `<div style="display:flex;align-items:center;gap:10px;background:#111125;border-radius:6px;padding:9px 14px;margin-bottom:6px;border:0.5px solid #1e1e30">
+        <span style="width:8px;height:8px;border-radius:50%;background:${qc};flex-shrink:0;display:inline-block"></span>
+        <span style="font-size:13px;font-weight:600;color:#e0e0e0;min-width:160px">${r.isubgroup}</span>
+        <span style="font-size:12px;color:#888;flex:1">${r.alerts.join(' · ')}</span>
+        ${trkBadge(r)}
+      </div>`;
+    };
+    let html = '';
+    if(bullish.length) html += `<div style="font-size:10px;color:#00C853;margin-bottom:4px;margin-top:2px">BULLISH</div>${bullish.map(mkRow).join('')}`;
+    if(bearish.length) html += `<div style="font-size:10px;color:#D50000;margin-bottom:4px;margin-top:10px">BEARISH</div>${bearish.map(mkRow).join('')}`;
+    alertEl.innerHTML = html;
+  }
+
+  // Table
+  const tb = document.getElementById('trk-tb');
+  tb.innerHTML = rows.map(r=>{
+    const qc  = QC[r.quadrant]||'#888';
+    const tc  = TAIL_COLOR[r.tail]||'#555';
+    const ta  = TAIL_ARROW[r.tail]||'→';
+    const al  = r.alerts.length ? `<span style="color:#FFD740;font-size:10px">${r.alerts.join(', ')}</span>` : '<span style="color:#333;font-size:10px">—</span>';
+    const rr  = r.rs_ratio >= 100 ? `<span style="color:#00C853">${r.rs_ratio.toFixed(2)}</span>` : `<span style="color:#D50000">${r.rs_ratio.toFixed(2)}</span>`;
+    const rm  = r.rs_momentum >= 100 ? `<span style="color:#00C853">${r.rs_momentum.toFixed(2)}</span>` : `<span style="color:#D50000">${r.rs_momentum.toFixed(2)}</span>`;
+    return `<tr>
+      <td style="color:#90CAF9;font-weight:600">${r.isubgroup}</td>
+      <td style="color:#888">${r.igroup}</td>
+      <td><span style="color:${qc};font-weight:600">${r.quadrant}</span></td>
+      <td><span style="color:${tc}">${ta} ${r.tail}</span></td>
+      <td>${rr}</td>
+      <td>${rm}</td>
+      <td style="color:#555">${r.days_in_q}</td>
+      <td>${al}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('trk-cnt').textContent = `${rows.length} ISubGroups`;
+}
 </script>
 </body>
 </html>'''
