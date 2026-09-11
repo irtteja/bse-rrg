@@ -896,6 +896,176 @@ def build_dashboard(rrg_data: dict, igroup_indices: pd.DataFrame,
     tracker_rows.sort(key=lambda x: (0 if x["alerts"] else 1, Q_ORDER.get(x["quadrant"], 9)))
     data_obj["tracker"] = tracker_rows
 
+    # ── Breadth Tab ────────────────────────────────────────────────────────────
+    # Compute A/D, Avg↑, Avg↓, MCap-weighted return, Equal-weighted return per
+    # ISubGroup for Daily (1D), Weekly (5D), Monthly (22D) windows.
+    # Also compute market-wide breadth across all BSE500 stocks.
+
+    def compute_breadth_tf(pm: pd.DataFrame, univ: pd.DataFrame, n_days: int):
+        """
+        For each ISubGroup compute breadth over the last n_days trading days.
+        Returns dict keyed by isubgroup with A/D, avg_up, avg_dn, idx_ret, eq_ret.
+        Also returns market-wide row under key '__market__'.
+        """
+        if pm.empty or len(pm) < n_days + 1:
+            return {}
+
+        # Price change over window
+        prices_now  = pm.iloc[-1]
+        prices_prev = pm.iloc[-(n_days + 1)]
+        rets = ((prices_now - prices_prev) / prices_prev).dropna()
+
+        # Build scrip_code → isubgroup map
+        sg_map = univ.set_index("scrip_code")["isubgroup"].to_dict()
+        mcap_col = "mktcap_cr" if "mktcap_cr" in univ.columns else ("mcap" if "mcap" in univ.columns else None)
+        mcap_map = univ.set_index("scrip_code")[mcap_col].to_dict() if mcap_col else {}
+
+        result = {}
+
+        # Per ISubGroup
+        isg_groups = {}
+        for code, ret in rets.items():
+            sg = sg_map.get(code)
+            if sg:
+                isg_groups.setdefault(sg, []).append((code, ret))
+
+        for sg, items in isg_groups.items():
+            codes   = [c for c, _ in items]
+            r_vals  = [r for _, r in items]
+            adv     = [r for r in r_vals if r > 0]
+            dec     = [r for r in r_vals if r < 0]
+            avg_up  = round(float(np.mean(adv)) * 100, 2) if adv else 0.0
+            avg_dn  = round(float(np.mean(dec)) * 100, 2) if dec else 0.0
+
+            # MCap-weighted (index-like) return
+            mcaps   = [mcap_map.get(c, 1) for c in codes]
+            total_mc = sum(mcaps) or 1
+            idx_ret = round(sum(r * m for (_, r), m in zip(items, mcaps)) / total_mc * 100, 2)
+
+            # Equal-weighted return
+            eq_ret  = round(float(np.mean(r_vals)) * 100, 2)
+            gap     = round(idx_ret - eq_ret, 2)
+
+            # Breadth signal
+            adv_count = len(adv)
+            dec_count = len(dec)
+            total     = len(r_vals)
+            ratio     = adv_count / dec_count if dec_count else float('inf')
+
+            if ratio >= 2.0 and abs(gap) <= 0.5:
+                signal = "Broad"
+            elif ratio >= 1.2 and abs(gap) <= 1.0:
+                signal = "Building"
+            elif ratio >= 1.0 and gap > 1.0:
+                signal = "HW driven"
+            elif adv_count > dec_count and gap > 0.5:
+                signal = "Narrowing"
+            elif ratio < 1.0 and gap > 0.5:
+                signal = "Weakening"
+            else:
+                signal = "Weakening"
+
+            result[sg] = {
+                "adv": adv_count, "dec": dec_count, "total": total,
+                "avg_up": avg_up, "avg_dn": avg_dn,
+                "idx_ret": idx_ret, "eq_ret": eq_ret, "gap": gap,
+                "signal": signal,
+            }
+
+        # Market-wide
+        all_rets  = list(rets.values)
+        all_adv   = [r for r in all_rets if r > 0]
+        all_dec   = [r for r in all_rets if r < 0]
+        all_codes = list(rets.index)
+        all_mcaps = [mcap_map.get(c, 1) for c in all_codes]
+        total_mc  = sum(all_mcaps) or 1
+        mkt_idx   = round(sum(r * m for r, m in zip(all_rets, all_mcaps)) / total_mc * 100, 2)
+        mkt_eq    = round(float(np.mean(all_rets)) * 100, 2) if all_rets else 0.0
+        result["__market__"] = {
+            "adv": len(all_adv), "dec": len(all_dec), "total": len(all_rets),
+            "avg_up": round(float(np.mean(all_adv)) * 100, 2) if all_adv else 0.0,
+            "avg_dn": round(float(np.mean(all_dec)) * 100, 2) if all_dec else 0.0,
+            "idx_ret": mkt_idx, "eq_ret": mkt_eq, "gap": round(mkt_idx - mkt_eq, 2),
+            "signal": "",
+        }
+        return result
+
+    import numpy as np
+
+    b1d = compute_breadth_tf(price_matrix, universe, 1)
+    b5d = compute_breadth_tf(price_matrix, universe, 5)
+    b20d = compute_breadth_tf(price_matrix, universe, 20)
+
+    # Also compute previous period for trend arrows (compare current vs 5 days ago window)
+    # We use n+5 days ago as the prev window reference
+    def breadth_trend(cur_adv, cur_dec, prev_adv, prev_dec):
+        cur_ratio  = cur_adv  / (cur_dec  or 1)
+        prev_ratio = prev_adv / (prev_dec or 1)
+        if cur_ratio > prev_ratio * 1.05:
+            return "up"
+        elif cur_ratio < prev_ratio * 0.95:
+            return "dn"
+        return "neu"
+
+    b1d_prev  = compute_breadth_tf(price_matrix.iloc[:-1],  universe, 1)   # yesterday's 1D
+    b5d_prev  = compute_breadth_tf(price_matrix.iloc[:-5],  universe, 5)   # last week's 5D
+    b20d_prev = compute_breadth_tf(price_matrix.iloc[:-20], universe, 20)  # last month's 22D
+
+    # Build breadth rows per ISubGroup
+    breadth_rows = []
+    all_sgs = set(b1d.keys()) | set(b5d.keys()) | set(b20d.keys())
+    all_sgs.discard("__market__")
+
+    for sg in all_sgs:
+        d  = b1d.get(sg,  {})
+        w  = b5d.get(sg,  {})
+        m  = b20d.get(sg, {})
+        dp = b1d_prev.get(sg,  {})
+        wp = b5d_prev.get(sg,  {})
+        mp = b20d_prev.get(sg, {})
+
+        if not d and not w and not m:
+            continue
+
+        igrp   = meta_lookup.loc[sg, "igroup"] if sg in meta_lookup.index else ""
+        q_now  = ""
+        for row in tracker_rows:
+            if row["isubgroup"] == sg:
+                q_now = row["quadrant"]
+                break
+
+        # Overall breadth = worst of the three timeframes
+        sigs   = [x.get("signal","") for x in [d, w, m] if x]
+        SIG_RANK = {"Broad":0,"Building":1,"Narrowing":2,"HW driven":3,"Weakening":4}
+        overall = max(sigs, key=lambda s: SIG_RANK.get(s, 0)) if sigs else ""
+
+        breadth_rows.append({
+            "isubgroup": sg,
+            "igroup":    igrp,
+            "quadrant":  q_now,
+            "1d":   {**d,  "trend": breadth_trend(d.get("adv",0),  d.get("dec",0),  dp.get("adv",0),  dp.get("dec",0))},
+            "5d":  {**w,  "trend": breadth_trend(w.get("adv",0),  w.get("dec",0),  wp.get("adv",0),  wp.get("dec",0))},
+            "20d": {**m,  "trend": breadth_trend(m.get("adv",0),  m.get("dec",0),  mp.get("adv",0),  mp.get("dec",0))},
+            "breadth": overall,
+        })
+
+    # Market-wide summary
+    mkt_d  = b1d.get("__market__",  {})
+    mkt_w  = b5d.get("__market__",  {})
+    mkt_20d  = b20d.get("__market__", {})
+    mkt_dp = b1d_prev.get("__market__",  {})
+    mkt_wp = b5d_prev.get("__market__",  {})
+    mkt_mp = b20d_prev.get("__market__", {})
+
+    data_obj["breadth"] = {
+        "market": {
+            "1d":   {**mkt_d,  "trend": breadth_trend(mkt_d.get("adv",0),  mkt_d.get("dec",0),  mkt_dp.get("adv",0),  mkt_dp.get("dec",0))},
+            "5d":  {**mkt_w,  "trend": breadth_trend(mkt_w.get("adv",0),  mkt_w.get("dec",0),  mkt_wp.get("adv",0),  mkt_wp.get("dec",0))},
+            "20d": {**mkt_20d,  "trend": breadth_trend(mkt_20d.get("adv",0),  mkt_20d.get("dec",0),  mkt_mp.get("adv",0),  mkt_mp.get("dec",0))},
+        },
+        "sectors": breadth_rows,
+    }
+
     data_json = json.dumps(data_obj)
 
     # HTML template — using % substitution to avoid f-string brace escaping
@@ -1028,9 +1198,10 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
     <button class="nav-tab active" onclick="switchTab('rrg',this)">Sector RRG</button>
     <button class="nav-tab"        onclick="switchTab('rot',this)">Stock Rotation</button>
     <button class="nav-tab"        onclick="switchTab('idx',this)">Sector Indices</button>
-    <button class="nav-tab"        onclick="switchTab('s2',this)">Stage 2</button>
     <button class="nav-tab"        onclick="switchTab('wl',this)">⭐ Watchlist <span id="wl-nav-count"></span></button>
     <button class="nav-tab"        onclick="switchTab('trk',this)">🔄 Tracker</button>
+    <button class="nav-tab"        onclick="switchTab('brd',this)">📊 Breadth</button>
+    <button class="nav-tab"        onclick="switchTab('pat',this)">🔍 Patterns</button>
     <span id="hdate"></span>
   </div>
 
@@ -1224,67 +1395,7 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
       </div>
     </div>
 
-    <!-- TAB 4: STAGE 2 -->
-    <div class="panel" id="tab-s2">
-      <div style="padding:6px 20px;text-align:right;font-size:11px;color:#444;flex-shrink:0"><span id="s2-date"></span></div>
-      <div style="flex:1;overflow-y:auto;padding:16px">
-        <div class="s2sum">
-          <div class="s2card"><div class="lbl">Total Stage 2 Stocks</div><div class="val" id="s2-total"></div><div class="sub" id="s2-pct"></div></div>
-          <div class="s2card"><div class="lbl">New Entries This Week</div><div class="val" id="s2-entries" style="color:#00C853"></div></div>
-          <div class="s2card"><div class="lbl">New Exits This Week</div><div class="val" id="s2-exits" style="color:#D50000"></div></div>
-          <div class="s2card"><div class="lbl">ISubGroups 100% in S2</div><div class="val" id="s2-full"></div></div>
-        </div>
-        <div class="s2grid">
-          <div class="s2sec" id="s2-trend-wrap" style="display:flex;flex-direction:column;height:320px">
-            <h3 style="flex-shrink:0">Total Stage 2 Stocks per Week</h3>
-            <canvas id="s2-trend" style="flex:1"></canvas>
-          </div>
-          <div class="s2sec" style="height:320px;display:flex;flex-direction:column">
-            <h3 style="flex-shrink:0">ISubGroups — % in Stage 2</h3>
-            <div id="s2-bars" style="flex:1;overflow-y:auto"></div>
-          </div>
-        </div>
-        <div class="s2grid">
-          <div class="s2sec">
-            <h3>🟢 New Entries This Week</h3>
-            <div class="tw" style="max-height:300px"><table><thead><tr>
-              <th onclick="s2Sort('entries','ticker')">Ticker</th><th onclick="s2Sort('entries','company')">Company</th>
-              <th onclick="s2Sort('entries','isubgroup')">ISubGroup</th><th onclick="s2Sort('entries','mktcap_cr')">MCap</th>
-              <th onclick="s2Sort('entries','rs_pct')">RS%</th>
-            </tr></thead><tbody id="s2-entries-tb"></tbody></table></div>
-          </div>
-          <div class="s2sec">
-            <h3>🔴 Exits This Week</h3>
-            <div class="tw" style="max-height:300px"><table><thead><tr>
-              <th onclick="s2Sort('exits','ticker')">Ticker</th><th onclick="s2Sort('exits','company')">Company</th>
-              <th onclick="s2Sort('exits','isubgroup')">ISubGroup</th><th onclick="s2Sort('exits','mktcap_cr')">MCap</th>
-              <th onclick="s2Sort('exits','rs_pct')">RS%</th>
-            </tr></thead><tbody id="s2-exits-tb"></tbody></table></div>
-          </div>
-        </div>
-        <div class="s2sec" style="margin-bottom:16px">
-          <h3>🔄 Continuing in Stage 2</h3>
-          <div class="tw" style="max-height:350px"><table><thead><tr>
-            <th onclick="s2Sort('cont','ticker')">Ticker</th><th onclick="s2Sort('cont','company')">Company</th>
-            <th onclick="s2Sort('cont','isubgroup')">ISubGroup</th><th onclick="s2Sort('cont','mktcap_cr')">MCap</th>
-            <th onclick="s2Sort('cont','rs_pct')">RS%</th>
-          </tr></thead><tbody id="s2-cont-tb"></tbody></table></div>
-          <div class="cnt" id="s2-cont-cnt"></div>
-        </div>
-        <div class="s2sec">
-          <h3>All Stage 2 Stocks</h3>
-          <input class="srch" id="s2-srch" placeholder="Search ticker or company…" oninput="renderS2All()" style="width:300px;margin-bottom:10px">
-          <div class="tw" style="max-height:500px"><table><thead><tr>
-            <th onclick="s2Sort('all','ticker')">Ticker</th><th onclick="s2Sort('all','company')">Company</th>
-            <th onclick="s2Sort('all','isubgroup')">ISubGroup</th><th onclick="s2Sort('all','mktcap_cr')">MCap</th>
-            <th onclick="s2Sort('all','rs_pct')">RS%</th>
-          </tr></thead><tbody id="s2-all-tb"></tbody></table></div>
-          <div class="cnt" id="s2-all-cnt"></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- TAB 5: WATCHLIST -->
+    <!-- TAB 4: WATCHLIST -->
     <div class="panel" id="tab-wl">
       <div style="padding:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
@@ -1356,6 +1467,113 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
           </table>
         </div>
         <div class="cnt" id="trk-cnt"></div>
+      </div>
+    </div>
+
+    <!-- TAB 7: BREADTH -->
+    <div class="panel" id="tab-brd">
+      <div style="flex:1;overflow-y:auto;padding:16px">
+
+        <!-- Market breadth summary cards -->
+        <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">BSE500 — Market Breadth</div>
+        <div id="brd-mkt" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:20px"></div>
+
+        <!-- Sector table toolbar -->
+        <div class="toolbar" style="flex-wrap:nowrap;margin-bottom:10px">
+          <label>Quadrant:</label>
+          <select id="brd-q" onchange="renderBreadth()">
+            <option value="">All</option>
+            <option>Leading</option><option>Improving</option>
+            <option>Weakening</option><option>Lagging</option>
+          </select>
+          <label>IGroup:</label>
+          <select id="brd-ig" onchange="onBrdIGChange()" style="max-width:160px"><option value="">All IGroups</option></select>
+          <label>ISubGroup:</label>
+          <select id="brd-sg" onchange="renderBreadth()" style="max-width:160px"><option value="">All</option></select>
+          <input class="srch" id="brd-srch" placeholder="Search…" oninput="renderBreadth()" style="width:110px">
+        </div>
+
+        <div class="tw">
+          <table id="brd-table">
+            <thead><tr>
+              <th style="width:20px"></th>
+              <th onclick="brdSort(\'isubgroup\')">ISubGroup</th>
+              <th onclick="brdSort(\'quadrant\')">Quadrant</th>
+              <th onclick="brdSort(\'d_adv\')" style="text-align:right"><span style="color:#90CAF9">1D</span> A/D</th>
+              <th onclick="brdSort(\'5d_adv\')" style="text-align:right"><span style="color:#FFD740">5D</span> A/D</th>
+              <th onclick="brdSort(\'20d_adv\')" style="text-align:right"><span style="color:#FF6D00">20D</span> A/D</th>
+            </tr></thead>
+            <tbody id="brd-tb"></tbody>
+          </table>
+        </div>
+        <div class="cnt" id="brd-cnt"></div>
+      </div>
+    </div>
+
+    <!-- TAB 6: PATTERN -->
+    <style>
+    .pat-wrap{display:flex;flex:1;overflow:hidden;min-height:0}
+    .pat-sidebar{width:190px;flex-shrink:0;border-right:0.5px solid #1e1e30;padding:12px;display:flex;flex-direction:column;gap:8px;overflow-y:auto;background:#0d0d1f}
+    .pat-sb-label{font-size:10px;color:#555;margin-bottom:2px}
+    .pat-sb-sel{width:100%;font-size:11px;padding:6px 8px;border-radius:6px;border:0.5px solid #1e1e30;background:#111125;color:#e0e0e0}
+    .pat-sb-inp{width:100%;font-size:11px;padding:6px 8px;border-radius:6px;border:0.5px solid #1e1e30;background:#111125;color:#e0e0e0}
+    .pat-main{flex:1;overflow:hidden;padding:12px;display:flex;flex-direction:column;gap:10px;min-height:0}
+    .pat-sum-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
+    .pat-sum-card{background:#111125;border:0.5px solid #1e1e30;border-radius:8px;padding:8px 10px}
+    .pat-sum-lbl{font-size:9px;color:#555;margin-bottom:3px}
+    .pat-sum-val{font-size:17px;font-weight:500}
+    .pat-sum-sub{font-size:9px;color:#444;margin-top:1px}
+    .pbu{background:#00C853}.pbd{background:#D50000}.pbc{background:#2962FF}.pbs{background:#333}.pbv{background:#FF6D00}
+    </style>
+    <div class="panel" id="tab-pat">
+      <div class="pat-wrap">
+        <div class="pat-sidebar">
+          <div><div class="pat-sb-label">Pattern</div>
+            <select class="pat-sb-sel" id="pat-fp" onchange="renderPat()">
+              <option value="">All</option>
+              <option>Uptrend</option><option>Contracting</option>
+              <option>Sideways</option><option>Downtrend</option><option>Volatile</option>
+            </select>
+          </div>
+          <div><div class="pat-sb-label">IGroup</div>
+            <select class="pat-sb-sel" id="pat-ig" onchange="onPatIGChange()"><option value="">All IGroups</option></select>
+          </div>
+          <div><div class="pat-sb-label">ISubGroup</div>
+            <select class="pat-sb-sel" id="pat-sg" onchange="renderPat()"><option value="">All</option></select>
+          </div>
+          <div><div class="pat-sb-label">MA filter</div>
+            <select class="pat-sb-sel" id="pat-ma" onchange="renderPat()">
+              <option value="">All</option>
+              <option value="above">Above 30W MA</option>
+              <option value="below">Below 30W MA</option>
+            </select>
+          </div>
+          <div><div class="pat-sb-label">Search</div>
+            <input class="pat-sb-inp" id="pat-fs" placeholder="Stock or sector…" oninput="renderPat()">
+          </div>
+          <div style="font-size:10px;color:#555;margin-top:4px" id="pat-cnt"></div>
+        </div>
+        <div class="pat-main">
+          <div class="pat-sum-grid" id="pat-summary"></div>
+          <div style="border:0.5px solid #1e1e30;border-radius:12px;overflow:hidden;flex:1;min-height:0">
+            <div style="overflow-y:auto;height:100%">
+            <table id="pat-table">
+              <thead><tr>
+                <th style="width:20px"></th>
+                <th onclick="patSort(\'sg\')">ISubGroup</th>
+                <th onclick="patSort(\'ig\')">IGroup</th>
+                <th onclick="patSort(\'up\')" style="text-align:right;color:#00C853">Uptrend</th>
+                <th onclick="patSort(\'con\')" style="text-align:right;color:#2962FF">Contracting</th>
+                <th onclick="patSort(\'sid\')" style="text-align:right;color:#555">Sideways</th>
+                <th onclick="patSort(\'dn\')" style="text-align:right;color:#D50000">Downtrend</th>
+                <th onclick="patSort(\'vol\')" style="text-align:right;color:#FF6D00">Volatile</th>
+                <th style="text-align:right;color:#555">Dominant</th>
+              </tr></thead>
+              <tbody id="pat-tb"></tbody>
+            </table>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1440,7 +1658,6 @@ const idxSG=document.getElementById('idx-sg');
 if(idxSG) allISG.forEach(s=>{const o=document.createElement('option');o.value=s;o.textContent=s;idxSG.appendChild(o);});
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
-let s2Ready=false;
 function switchTab(id,btn){
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(b=>b.classList.remove('active'));
@@ -1449,9 +1666,9 @@ function switchTab(id,btn){
   stopPlay();
   if(id==='rot') renderRot();
   if(id==='idx') renderIdx();
-  if(id==='s2' && !s2Ready){ initS2(); s2Ready=true; }
   if(id==='trk') renderTracker();
-  else if(id==='s2') renderS2All();
+  if(id==='brd') renderBreadthTab();
+  if(id==='pat') renderPatTab();
   if(id==='wl') renderWatchlist();
 }
 
@@ -2209,119 +2426,365 @@ function closeDrill(){
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrill();});
 
-// ── Stage 2 ───────────────────────────────────────────────────────────────────
-let s2Charts={}, s2Sorts={entries:{k:'mktcap_cr',d:-1},exits:{k:'mktcap_cr',d:-1},cont:{k:'rs_pct',d:-1},all:{k:'rs_pct',d:-1}};
-
-function initS2(){
-  const s2=DATA.stage2; if(!s2){console.warn('No Stage 2 data');return;}
-  document.getElementById('s2-date').textContent='As of '+DATA.meta.generated;
-  document.getElementById('s2-total').textContent=s2.total_stage2;
-  document.getElementById('s2-pct').textContent=Math.round(s2.total_stage2/s2.total_stocks*100)+'% of '+s2.total_stocks+' stocks';
-  document.getElementById('s2-entries').textContent=s2.new_entries.length;
-  document.getElementById('s2-exits').textContent=s2.new_exits.length;
-  document.getElementById('s2-full').textContent=Object.values(s2.industry_pct).filter(v=>v.pct===100).length;
-
-  // Trend chart
-  const dates=Object.keys(s2.weekly_counts).sort();
-  const vals=dates.map(d=>s2.weekly_counts[d]);
-  const tw=document.getElementById('s2-trend-wrap');
-  if(dates.length<4){
-    tw.style.display='none';
-    document.querySelector('.s2grid').style.gridTemplateColumns='1fr';
-  } else {
-    const ctx=document.getElementById('s2-trend').getContext('2d');
-    s2Charts.trend=new Chart(ctx,{type:'line',data:{labels:dates,datasets:[{
-      label:'Stage 2 Stocks',data:vals,borderColor:'#2962FF',backgroundColor:'rgba(41,98,255,0.1)',
-      borderWidth:2,pointRadius:0,fill:true,tension:0.3
-    }]},options:{responsive:true,maintainAspectRatio:false,animation:false,
-      interaction:{mode:'index',intersect:false},
-      scales:{x:{ticks:{color:'#666',font:{size:9},maxTicksLimit:12,callback:(v,i)=>dates[i]?.slice(5)},grid:{color:'#1e1e30'}},
-              y:{ticks:{color:'#666',font:{size:9}},grid:{color:'#1e1e30'},beginAtZero:true}},
-      plugins:{legend:{display:false},tooltip:{backgroundColor:'#1a1a2e',borderColor:'#2962FF',borderWidth:1,
-        padding:10,titleColor:'#90CAF9',bodyColor:'#e0e0e0',callbacks:{title:i=>'Week: '+i[0].label,label:i=>'Stage 2: '+i.raw}}}}});
-  }
-
-  // Industry bars
-  const sorted=Object.entries(s2.industry_pct).sort((a,b)=>b[1].pct-a[1].pct);
-  document.getElementById('s2-bars').innerHTML=sorted.map(([ig,v])=>`
-    <div class="bar-row">
-      <div class="bar-lbl" title="${ig}">${ig}</div>
-      <div class="bar-bg"><div class="bar-fill" style="width:${v.pct}%;background:${v.pct>=75?'#00C853':v.pct>=50?'#2962FF':v.pct>=25?'#FF6D00':'#D50000'}"></div></div>
-      <div class="bar-pct">${v.pct}%</div>
-    </div>`).join('');
-
-  // Tables
-  renderS2Tbl('entries',s2.new_entries);
-  renderS2Tbl('exits',s2.new_exits);
-
-  // Continuing = in Stage 2 stocks with weeks_in_s2 > 1, not new entries
-  const entryTickers=new Set(s2.new_entries.map(s=>s.ticker));
-  const allS2=Object.values(s2.stocks);
-  const cont=allS2.filter(s=>!entryTickers.has(s.ticker)&&s.weeks_in_s2>1);
-  renderS2Tbl('cont',cont);
-  document.getElementById('s2-cont-cnt').textContent=cont.length+' stocks continuing in Stage 2';
-
-  renderS2All();
-}
-
-function renderS2Tbl(id,rows){
-  const {k,d}=s2Sorts[id];
-  const sorted=[...rows].sort((a,b)=>{
-    const av=a[k]??0, bv=b[k]??0;
-    return typeof av==='number'?d*(bv-av):d*String(av).localeCompare(String(bv));
-  });
-  document.getElementById('s2-'+id+'-tb').innerHTML=sorted.map((s,i)=>{
-    const c=QC[s.quadrant]||'#888';
-    const rsp=s.rs_pct??0;
-    return `<tr style="background:${i%2===0?'#0a0a1a':'#0e0e22'}">
-      <td style="padding:5px 8px;color:#90CAF9;font-weight:600">${s.ticker||''}</td>
-      <td style="padding:5px 8px;color:#ccc;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.company||''}</td>
-      <td style="padding:5px 8px;color:#888;font-size:10px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.isubgroup||''}</td>
-      <td style="padding:5px 8px;color:#888;text-align:right">${fmtCr(s.mktcap_cr||0)}</td>
-      <td style="padding:5px 8px;text-align:right;color:${rsp>=0?'#69F0AE':'#FF8A80'}">${rsp.toFixed(1)}%</td>
-    </tr>`;
-  }).join('')||'<tr><td colspan="5" style="padding:12px;text-align:center;color:#444">No data.</td></tr>';
-}
-
-function renderS2All(){
-  const s2=DATA.stage2; if(!s2) return;
-  const q=(document.getElementById('s2-srch')?.value||'').toLowerCase();
-  let rows=Object.values(s2.stocks);
-  if(q) rows=rows.filter(s=>s.ticker?.toLowerCase().includes(q)||s.company?.toLowerCase().includes(q));
-  const {k,d}=s2Sorts.all;
-  rows.sort((a,b)=>{const av=a[k]??0,bv=b[k]??0;return typeof av==='number'?d*(bv-av):d*String(av).localeCompare(String(bv));});
-  document.getElementById('s2-all-tb').innerHTML=rows.map((s,i)=>{
-    const rsp=s.rs_pct??0;
-    return `<tr style="background:${i%2===0?'#0a0a1a':'#0e0e22'}">
-      <td style="padding:5px 8px;color:#90CAF9;font-weight:600">${s.ticker||''}</td>
-      <td style="padding:5px 8px;color:#ccc;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.company||''}</td>
-      <td style="padding:5px 8px;color:#888;font-size:10px;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.isubgroup||''}</td>
-      <td style="padding:5px 8px;color:#888;text-align:right">${fmtCr(s.mktcap_cr||0)}</td>
-      <td style="padding:5px 8px;text-align:right;color:${rsp>=0?'#69F0AE':'#FF8A80'}">${rsp.toFixed(1)}%</td>
-    </tr>`;
-  }).join('')||'<tr><td colspan="5" style="padding:12px;text-align:center;color:#444">No stocks.</td></tr>';
-  document.getElementById('s2-all-cnt').textContent=rows.length+' stocks in Stage 2';
-}
-
-function s2Sort(tbl,k){
-  const s=s2Sorts[tbl];
-  s.d=s.k===k?-s.d:-1; s.k=k;
-  const s2=DATA.stage2; if(!s2) return;
-  if(tbl==='all'){ renderS2All(); return; }
-  if(tbl==='entries') renderS2Tbl('entries',s2.new_entries);
-  else if(tbl==='exits') renderS2Tbl('exits',s2.new_exits);
-  else if(tbl==='cont'){
-    const entryTickers=new Set(s2.new_entries.map(s=>s.ticker));
-    renderS2Tbl('cont',Object.values(s2.stocks).filter(s=>!entryTickers.has(s.ticker)&&s.weeks_in_s2>1));
-  }
-}
-
 // ── Init ──────────────────────────────────────────────────────────────────────
 window.addEventListener('resize', drawRRG);
 drawRRG();
 renderRot();
 
-// ── Rotation Tracker ──────────────────────────────────────────────────────────
+// ── Breadth Tab ───────────────────────────────────────────────────────────────
+let brdSortKey='d_adv', brdSortDir=-1;
+let brdReady=false;
+
+const SIG_C={
+  'Broad':    {bg:'#00C85322',c:'#00C853'},
+  'Building': {bg:'#00C85322',c:'#00C853'},
+  'Narrowing':{bg:'#FF6D0022',c:'#FF6D00'},
+  'HW driven':{bg:'#FF6D0022',c:'#FF6D00'},
+  'Weakening':{bg:'#D5000022',c:'#D50000'},
+};
+const SIG_RANK={'Broad':0,'Building':1,'Narrowing':2,'HW driven':3,'Weakening':4};
+const BS_BORDER={'Broad':'#00C853','Building':'#00C853','Narrowing':'#FF6D00','HW driven':'#FF6D00','Weakening':'#D50000'};
+const BS_BG={'Broad':'#00C85310','Building':'#00C85310','Narrowing':'#FF6D0010','HW driven':'#FF6D0010','Weakening':'#D5000010'};
+
+function brdTrend(t){return t==='up'?'<span style="color:#00C853;font-size:10px">↑</span>':t==='dn'?'<span style="color:#D50000;font-size:10px">↓</span>':'<span style="color:#555;font-size:10px">→</span>';}
+function brdSig(s){const sc=SIG_C[s]||{bg:'#33333322',c:'#888'};return `<span style="font-size:9px;padding:1px 5px;border-radius:8px;font-weight:500;background:${sc.bg};color:${sc.c}">${s||'—'}</span>`;}
+function brdRet(v){if(v===undefined||v===null) return '—'; const c=v>=0?'#00C853':'#D50000'; return `<span style="color:${c};font-weight:500">${v>=0?'+':''}${v.toFixed(2)}%</span>`;}
+function brdRatio(adv,dec){
+  if(!dec) return '<span style="color:#00C853;font-weight:600">∞</span>';
+  const r=(adv/dec).toFixed(1);
+  const c=adv>dec?'#00C853':adv<dec?'#D50000':'#888';
+  return `<span style="font-size:10px;padding:1px 6px;border-radius:8px;font-weight:500;background:${c}22;color:${c}">${r}:1</span>`;
+}
+
+function mktCard(tf, d, label){
+  if(!d||!d.adv) return `<div style="border:0.5px solid #1e1e30;border-radius:10px;padding:12px 14px;background:#0d0d1a"><div style="font-size:9px;color:${tf==='Daily'?'#90CAF9':tf==='Weekly'?'#FFD740':'#FF6D00'};font-weight:600;text-transform:uppercase;margin-bottom:8px">${tf}</div><div style="color:#333;font-size:11px">No data</div></div>`;
+  const tc=tf==='Daily'?'#90CAF9':tf==='Weekly'?'#FFD740':'#FF6D00';
+  const ratio=d.dec?d.adv/d.dec:Infinity;
+  const rc=ratio>=2?'#00C853':ratio>=1?'#FFD740':'#D50000';
+  return `<div style="border:0.5px solid #1e1e30;border-radius:10px;padding:12px 14px;background:#0d0d1a">
+    <div style="font-size:9px;color:${tc};font-weight:600;text-transform:uppercase;margin-bottom:8px">${tf}</div>
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+      <span style="color:#00C853;font-weight:600;font-size:13px">${d.adv}↑</span>
+      <span style="color:#333">/</span>
+      <span style="color:#D50000;font-weight:600;font-size:13px">${d.dec}↓</span>
+      ${brdRatio(d.adv,d.dec)}
+      ${brdTrend(d.trend)}
+    </div>
+    <div style="border-top:0.5px solid #1e1e30;margin:6px 0"></div>
+    <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:#555;font-size:10px">Index (MCap)</span>${brdRet(d.idx_ret)}</div>
+    <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:#555;font-size:10px">Equal-weighted</span>${brdRet(d.eq_ret)}</div>
+    <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:#555;font-size:10px">Gap</span>${brdRet(d.gap)}</div>
+    <div style="border-top:0.5px solid #1e1e30;margin:6px 0"></div>
+    <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:#555;font-size:10px">Avg↑ (advancers)</span><span style="color:#00C853;font-weight:500">${d.avg_up>=0?'+':''}${(d.avg_up||0).toFixed(2)}%</span></div>
+    <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:#555;font-size:10px">Avg↓ (decliners)</span><span style="color:#D50000;font-weight:500">${(d.avg_dn||0).toFixed(2)}%</span></div>
+    <div style="border-top:0.5px solid #1e1e30;margin:6px 0;font-size:10px;color:#555">Avg↑/Avg↓ = <span style="color:${rc};font-weight:600">${d.avg_dn?Math.abs(d.avg_up/d.avg_dn).toFixed(1)+'x':'∞'}</span> &nbsp;·&nbsp; ${d.adv} of ${d.total||d.adv+d.dec} advanced</div>
+  </div>`;
+}
+
+function brdExpandRow(r){
+  const summaries={
+    'Broad':    'Strong A/D across all timeframes. Buyers consistently stronger than sellers. Gap between index and equal-weighted return is minimal — broad genuine move.',
+    'Building': 'Breadth improving across timeframes. Buyers gaining strength. Gap small and stable — genuine participation.',
+    'Narrowing':'Breadth deteriorating across timeframes. Fewer stocks participating. Gap growing — leadership narrowing.',
+    'HW driven':'Index up but majority of stocks not participating. Gap growing — a few heavyweights distorting the index.',
+    'Weakening':'Majority declining across timeframes. Sellers consistently stronger than buyers.',
+  };
+  const bc=BS_BORDER[r.breadth]||'#555';
+  const bbg=BS_BG[r.breadth]||'#11111122';
+  const tfs=[
+    {label:'1D',lc:'#90CAF9',d:r['1d']},
+    {label:'5D',lc:'#FFD740',d:r['5d']},
+    {label:'20D',lc:'#FF6D00',d:r['20d']},
+  ];
+  const tfHtml=tfs.map(tf=>{
+    const d=tf.d||{};
+    const ratio=d.avg_dn?Math.abs(d.avg_up/d.avg_dn).toFixed(1)+'x':'∞';
+    const ratioc=(d.avg_up&&d.avg_dn&&Math.abs(d.avg_up)>Math.abs(d.avg_dn))?'#00C853':'#D50000';
+    return `<div>
+      <div style="font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:${tf.lc};margin-bottom:10px">${tf.label}</div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px"><span style="color:#555;font-size:10px">A/D</span><span style="color:${d.adv>d.dec?'#00C853':'#D50000'};font-weight:500">${d.adv||0}:${d.dec||0}</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px"><span style="color:#555;font-size:10px">Index (MCap)</span>${brdRet(d.idx_ret)}</div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px"><span style="color:#555;font-size:10px">Equal-weighted</span>${brdRet(d.eq_ret)}</div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px"><span style="color:#555;font-size:10px">Gap</span>${brdRet(d.gap)}</div>
+      <div style="border-top:0.5px solid #1e1e30;margin:6px 0"></div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px"><span style="color:#555;font-size:10px">Avg↑ (advancers)</span><span style="color:#00C853;font-weight:500">+${(d.avg_up||0).toFixed(2)}%</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px"><span style="color:#555;font-size:10px">Avg↓ (decliners)</span><span style="color:#D50000;font-weight:500">${(d.avg_dn||0).toFixed(2)}%</span></div>
+      <div style="border-top:0.5px solid #1e1e30;margin-top:6px;padding-top:6px;font-size:10px;color:#555">Avg↑/Avg↓ = <span style="color:${ratioc};font-weight:600">${ratio}</span> &nbsp;·&nbsp; ${d.adv||0} of ${d.total||((d.adv||0)+(d.dec||0))} advanced</div>
+    </div>`;
+  }).join('');
+  return `<div style="padding:14px 16px 16px 32px;background:#0d0d1a">
+    <div style="font-size:11px;color:#aaa;margin-bottom:14px;padding:10px 12px;border-radius:6px;border-left:3px solid ${bc};background:${bbg};line-height:1.6">
+      <div style="font-weight:600;margin-bottom:3px">${r.breadth}</div>${summaries[r.breadth]||''}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px">${tfHtml}</div>
+  </div>`;
+}
+
+function onBrdIGChange(){
+  const ig=(document.getElementById('brd-ig')||{}).value||'';
+  const sgEl=document.getElementById('brd-sg');
+  sgEl.innerHTML='<option value="">All</option>';
+  const sgs=[...new Set((DATA.breadth?.sectors||[]).filter(r=>!ig||r.igroup===ig).map(r=>r.isubgroup).filter(Boolean))].sort();
+  sgs.forEach(s=>{const o=document.createElement('option');o.value=s;o.textContent=s;sgEl.appendChild(o);});
+  renderBreadth();
+}
+
+function brdSort(k){
+  if(brdSortKey===k) brdSortDir*=-1; else{brdSortKey=k;brdSortDir=-1;}
+  renderBreadth();
+}
+
+function renderBreadth(){
+  const fq=(document.getElementById('brd-q')||{}).value||'';
+  const fb='';  // breadth filter removed
+  const fig=(document.getElementById('brd-ig')||{}).value||'';
+  const fsg=(document.getElementById('brd-sg')||{}).value||'';
+  const fs=((document.getElementById('brd-srch')||{}).value||'').toLowerCase();
+  const bd=DATA.breadth||{};
+  let rows=(bd.sectors||[]).filter(r=>{
+    if(fq&&r.quadrant!==fq) return false;
+    if(fb&&r.breadth!==fb) return false;
+    if(fig&&r.igroup!==fig) return false;
+    if(fsg&&r.isubgroup!==fsg) return false;
+    if(fs&&!r.isubgroup.toLowerCase().includes(fs)&&!r.igroup.toLowerCase().includes(fs)) return false;
+    return true;
+  });
+  rows.sort((a,b)=>{
+    let av,bv;
+    if(brdSortKey==='d_adv'){av=a['1d']?.adv||0;bv=b['1d']?.adv||0;}
+    else if(brdSortKey==='5d_adv'){av=a['5d']?.adv||0;bv=b['5d']?.adv||0;}
+    else if(brdSortKey==='20d_adv'){av=a['20d']?.adv||0;bv=b['20d']?.adv||0;}
+    else if(brdSortKey==='breadth'){av=0;bv=0;}
+    else{av=a[brdSortKey]||'';bv=b[brdSortKey]||'';}
+    if(typeof av==='string') return brdSortDir*(av.localeCompare(bv));
+    return brdSortDir*(av-bv);
+  });
+
+  const tb=document.getElementById('brd-tb');
+  tb.innerHTML='';
+  rows.forEach((r,i)=>{
+    const d=r['1d']||{},w=r['5d']||{},m=r['20d']||{};
+    const QC2={'Leading':'#00C853','Improving':'#2962FF','Weakening':'#FF6D00','Lagging':'#D50000'};
+    const qc=QC2[r.quadrant]||'#888';
+
+    const adCell=(tf,d)=>`<div style="display:flex;align-items:center;justify-content:flex-end;gap:3px">
+      <span style="color:${(d.adv||0)>(d.dec||0)?'#00C853':'#D50000'};font-weight:500">${d.adv||0}:${d.dec||0}</span>${brdTrend(d.trend)}
+    </div>
+    <div style="text-align:right;margin-top:2px">${brdSig(d.signal)}</div>`;
+
+    const tr=document.createElement('tr');
+    tr.className='main-row';
+    tr.innerHTML=`
+      <td><span class="chevron" id="bc${i}">▶</span></td>
+      <td style="color:#90CAF9;font-weight:500">${r.isubgroup}</td>
+      <td><span style="color:${qc};font-weight:600">${r.quadrant||'—'}</span></td>
+      <td>${adCell('d',d)}</td>
+      <td>${adCell('w',w)}</td>
+      <td>${adCell('m',m)}</td>`;
+
+    const exp=document.createElement('tr');
+    exp.id='be'+i;
+    exp.style.display='none';
+    exp.innerHTML=`<td colspan="6">${brdExpandRow(r)}</td>`;
+
+    tr.onclick=()=>{
+      const el=document.getElementById('be'+i);
+      const ch=document.getElementById('bc'+i);
+      const isOpen=el.style.display!=='none';
+      el.style.display=isOpen?'none':'table-row';
+      ch.classList.toggle('open',!isOpen);
+    };
+    tb.appendChild(tr);
+    tb.appendChild(exp);
+  });
+  document.getElementById('brd-cnt').textContent=`${rows.length} ISubGroups`;
+}
+
+function renderBreadthTab(){
+  if(brdReady) return;
+  brdReady=true;
+
+  // Populate IGroup dropdown
+  const igs=[...new Set((DATA.breadth?.sectors||[]).map(r=>r.igroup).filter(Boolean))].sort();
+  const igEl=document.getElementById('brd-ig');
+  if(igEl) igs.forEach(g=>{const o=document.createElement('option');o.value=g;o.textContent=g;igEl.appendChild(o);});
+
+  // Populate ISubGroup dropdown (all)
+  const sgs=[...new Set((DATA.breadth?.sectors||[]).map(r=>r.isubgroup).filter(Boolean))].sort();
+  const sgEl=document.getElementById('brd-sg');
+  if(sgEl) sgs.forEach(s=>{const o=document.createElement('option');o.value=s;o.textContent=s;sgEl.appendChild(o);});
+
+  // Market summary cards
+  const mkt=DATA.breadth?.market||{};
+  const mktEl=document.getElementById('brd-mkt');
+  if(mktEl) mktEl.innerHTML=
+    mktCard('1D',  mkt['1d'],  'Daily')+
+    mktCard('5D', mkt['5d'], 'Weekly')+
+    mktCard('20D',mkt['20d'],'Monthly');
+
+  renderBreadth();
+}
+
+// ── Pattern Tab ───────────────────────────────────────────────────────────────
+let patReady=false, patSortKey='up', patSortDir=-1;
+const PAT_C2={Uptrend:'#00C853',Contracting:'#2962FF',Sideways:'#555',Downtrend:'#D50000',Volatile:'#FF6D00'};
+const PAT_BG2={Uptrend:'#00C85322',Contracting:'#2962FF22',Sideways:'#33333322',Downtrend:'#D5000022',Volatile:'#FF6D0022'};
+const PAT_RANK={Uptrend:0,Contracting:1,Sideways:2,Downtrend:3,Volatile:4};
+
+function patBadge(p){return `<span style="font-size:10px;padding:2px 7px;border-radius:10px;font-weight:500;background:${PAT_BG2[p]||'#33333322'};color:${PAT_C2[p]||'#888'}">${p||'—'}</span>`;}
+function patRet(v){const c=v>=0?'#00C853':'#D50000';return `<span style="color:${c};font-weight:500">${v>=0?'+':''}${v.toFixed(2)}%</span>`;}
+
+function patSort(k){if(patSortKey===k)patSortDir*=-1;else{patSortKey=k;patSortDir=-1;}renderPat();}
+
+function onPatIGChange(){
+  const ig=document.getElementById('pat-ig').value;
+  const sgEl=document.getElementById('pat-sg');
+  sgEl.innerHTML='<option value="">All</option>';
+  const ip=DATA.stage2?.industry_pattern||{};
+  const sgs=[...new Set(Object.entries(ip).filter(([k,v])=>!ig||v.igroup===ig).map(([k])=>k))].sort();
+  sgs.forEach(s=>{const o=document.createElement('option');o.value=s;o.textContent=s;sgEl.appendChild(o);});
+  renderPat();
+}
+
+function renderPat(){
+  const fp=(document.getElementById('pat-fp')||{}).value||'';
+  const fig=(document.getElementById('pat-ig')||{}).value||'';
+  const fsg=(document.getElementById('pat-sg')||{}).value||'';
+  const fma=(document.getElementById('pat-ma')||{}).value||'';
+  const fs=((document.getElementById('pat-fs')||{}).value||'').toLowerCase();
+
+  const ip=DATA.stage2?.industry_pattern||{};
+  const allStocks=DATA.stage2?.all_stocks||{};
+
+  // Build sector rows
+  let rows=Object.entries(ip).map(([sg,v])=>({sg,...v})).filter(r=>{
+    if(fig&&r.igroup!==fig) return false;
+    if(fsg&&r.sg!==fsg) return false;
+    if(fp&&!(r[fp]>0)) return false;
+    if(fs&&!r.sg.toLowerCase().includes(fs)&&!r.igroup.toLowerCase().includes(fs)) return false;
+    return true;
+  });
+  rows.sort((a,b)=>{
+    let av=a[patSortKey],bv=b[patSortKey];
+    if(typeof av==='string') return patSortDir*(av.localeCompare(bv));
+    return patSortDir*((av||0)-(bv||0));
+  });
+
+  // Stock lookup by isubgroup
+  const stocksBySG={};
+  Object.values(allStocks).forEach(s=>{
+    const sg=s.isubgroup;
+    if(!sg) return;
+    if(!stocksBySG[sg]) stocksBySG[sg]=[];
+    let include=true;
+    if(fp&&s.pattern!==fp) include=false;
+    if(fma==='above'&&!s.above_ma) include=false;
+    if(fma==='below'&&s.above_ma) include=false;
+    if(include) stocksBySG[sg].push(s);
+  });
+
+  const tb=document.getElementById('pat-tb');
+  tb.innerHTML='';
+  rows.forEach((r,i)=>{
+    const total=r.total||1;
+    const bar=`<div class="pat-bar-wrap" style="display:flex;gap:2px;height:4px;border-radius:3px;overflow:hidden;margin-top:3px">
+      ${r.Uptrend?`<div class="pbu" style="width:${r.Uptrend/total*100}%"></div>`:''}
+      ${r.Contracting?`<div class="pbc" style="width:${r.Contracting/total*100}%"></div>`:''}
+      ${r.Sideways?`<div class="pbs" style="width:${r.Sideways/total*100}%"></div>`:''}
+      ${r.Downtrend?`<div class="pbd" style="width:${r.Downtrend/total*100}%"></div>`:''}
+      ${r.Volatile?`<div class="pbv" style="width:${r.Volatile/total*100}%"></div>`:''}
+    </div>`;
+
+    const tr=document.createElement('tr');
+    tr.style.cursor='pointer';
+    tr.style.borderBottom='0.5px solid #1e1e30';
+    tr.innerHTML=`
+      <td style="padding:7px 8px"><span class="chevron" id="pc${i}">▶</span></td>
+      <td style="padding:7px 8px;color:#90CAF9;font-weight:500">${r.sg}${bar}</td>
+      <td style="padding:7px 8px;color:#555;font-size:10px">${r.igroup||''}</td>
+      <td style="padding:7px 8px;text-align:right;color:#00C853;font-weight:500">${r.Uptrend||0}</td>
+      <td style="padding:7px 8px;text-align:right;color:#2962FF;font-weight:500">${r.Contracting||0}</td>
+      <td style="padding:7px 8px;text-align:right;color:#555">${r.Sideways||0}</td>
+      <td style="padding:7px 8px;text-align:right;color:#D50000;font-weight:500">${r.Downtrend||0}</td>
+      <td style="padding:7px 8px;text-align:right;color:#FF6D00;font-weight:500">${r.Volatile||0}</td>
+      <td style="padding:7px 8px;text-align:right">${patBadge(r.dominant)}</td>`;
+
+    const stocks=(stocksBySG[r.sg]||[]).sort((a,b)=>PAT_RANK[a.pattern]-PAT_RANK[b.pattern]);
+    const stkHtml=stocks.length?`
+      <div style="padding:10px 14px 12px 28px;background:#0d0d1a">
+        <div style="font-size:10px;color:#555;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">${r.sg} — stocks</div>
+        <table style="width:100%;border-collapse:collapse;font-size:11px">
+          <thead><tr>
+            <th style="padding:4px 8px;font-size:9px;color:#555;text-align:left;border-bottom:0.5px solid #1e1e30">Stock</th>
+            <th style="padding:4px 8px;font-size:9px;color:#555;text-align:left;border-bottom:0.5px solid #1e1e30">Pattern</th>
+            <th style="padding:4px 8px;font-size:9px;color:#555;text-align:left;border-bottom:0.5px solid #1e1e30">MA</th>
+            <th style="padding:4px 8px;font-size:9px;color:#90CAF9;text-align:right;border-bottom:0.5px solid #1e1e30">Daily</th>
+            <th style="padding:4px 8px;font-size:9px;color:#FFD740;text-align:right;border-bottom:0.5px solid #1e1e30">Weekly</th>
+            <th style="padding:4px 8px;font-size:9px;color:#FF6D00;text-align:right;border-bottom:0.5px solid #1e1e30">Monthly</th>
+          </tr></thead>
+          <tbody>${stocks.map(s=>`<tr>
+            <td style="padding:5px 8px;color:#90CAF9;font-weight:500">${s.company||s.ticker}</td>
+            <td style="padding:5px 8px">${patBadge(s.pattern)}</td>
+            <td style="padding:5px 8px;font-size:10px;color:#555">${s.above_ma?'Above':'Below'} 30W MA</td>
+            <td style="padding:5px 8px;text-align:right">${patRet(s.ret_1d||0)}</td>
+            <td style="padding:5px 8px;text-align:right">${patRet(s.ret_5d||0)}</td>
+            <td style="padding:5px 8px;text-align:right">${patRet(s.ret_20d||0)}</td>
+          </tr>`).join('')}</tbody>
+        </table>
+      </div>`:'<div style="padding:10px 28px;font-size:11px;color:#555">No stocks match current filters</div>';
+
+    const exp=document.createElement('tr');
+    exp.id='pe'+i;
+    exp.style.display='none';
+    exp.innerHTML=`<td colspan="9" style="padding:0;border-bottom:0.5px solid #1e1e30">${stkHtml}</td>`;
+
+    tr.onclick=()=>{
+      const el=document.getElementById('pe'+i);
+      const ch=document.getElementById('pc'+i);
+      const open=el.style.display!=='none';
+      el.style.display=open?'none':'table-row';
+      ch.classList.toggle('open',!open);
+    };
+    tb.appendChild(tr);
+    tb.appendChild(exp);
+  });
+  document.getElementById('pat-cnt').textContent=`${rows.length} ISubGroups`;
+}
+
+function renderPatTab(){
+  if(patReady) return;
+  patReady=true;
+
+  // Summary cards
+  const ps=DATA.stage2?.pattern_summary||{};
+  const total=Object.values(ps).reduce((a,b)=>a+b,0)||1;
+  const cards=[
+    {label:'Uptrend (HH HL)',key:'Uptrend',c:'#00C853',sub:'buy candidates'},
+    {label:'Contracting',key:'Contracting',c:'#2962FF',sub:'watch for breakout'},
+    {label:'Sideways',key:'Sideways',c:'#555',sub:'no clear direction'},
+    {label:'Downtrend (LH LL)',key:'Downtrend',c:'#D50000',sub:'avoid'},
+    {label:'Volatile',key:'Volatile',c:'#FF6D00',sub:'HH LL / LH HL'},
+  ];
+  document.getElementById('pat-summary').innerHTML=cards.map(c=>`
+    <div class="pat-sum-card">
+      <div class="pat-sum-lbl">${c.label}</div>
+      <div class="pat-sum-val" style="color:${c.c}">${ps[c.key]||0}</div>
+      <div class="pat-sum-sub">${Math.round((ps[c.key]||0)/total*100)}% · ${c.sub}</div>
+    </div>`).join('');
+
+  // Populate IGroup dropdown
+  const ip=DATA.stage2?.industry_pattern||{};
+  const igs=[...new Set(Object.values(ip).map(v=>v.igroup).filter(Boolean))].sort();
+  const igEl=document.getElementById('pat-ig');
+  igs.forEach(g=>{const o=document.createElement('option');o.value=g;o.textContent=g;igEl.appendChild(o);});
+
+  // Populate ISubGroup dropdown
+  const sgEl=document.getElementById('pat-sg');
+  Object.keys(ip).sort().forEach(s=>{const o=document.createElement('option');o.value=s;o.textContent=s;sgEl.appendChild(o);});
+
+  renderPat();
+}
+
 const TAIL_ARROW={Clockwise:'↗',Reversing:'↙',Flat:'→'};
 const TAIL_COLOR={Clockwise:'#00C853',Reversing:'#D50000',Flat:'#555'};
 let trkSortKey='alerts_len', trkSortDir=-1;
@@ -2450,58 +2913,76 @@ function renderTracker(){
 def compute_stage2(price_matrix: pd.DataFrame, benchmark: pd.Series,
                    meta: pd.DataFrame) -> dict:
     """
-    Compute Weinstein Stage 2 classification for each stock on each trading day.
+    Classify each stock into price pattern using swing high/low detection.
 
-    Stage 2 criteria (all must be true):
-      1. Price > 30-week MA (150-day MA)
-      2. 30-week MA is rising (MA today > MA 20 days ago)
-      3. RS vs BSE500 > 1-year ago RS (relative strength improving)
+    Patterns:
+      Uptrend    = HH + HL  (higher highs and higher lows)
+      Downtrend  = LH + LL  (lower highs and lower lows)
+      Contracting= LH + HL  (tightening range — coiling for breakout)
+      Volatile   = HH + LL  (expanding range — choppy)
+      Sideways   = no clear swing direction
 
-    Returns:
-      {
-        "weekly_counts":   { "YYYY-MM-DD": total_stage2_count },
-        "stocks":          { scrip_code: { weeks_in_stage2, entry_date,
-                                           pct_return, rs_pct, isubgroup,
-                                           ticker, company, mktcap_cr } },
-        "industry_pct":    { isubgroup: { total, stage2, pct } },
-        "new_entries":     [ stock_dict, ... ],
-        "new_exits":       [ stock_dict, ... ],
-      }
+    Stage 2 (legacy) = Uptrend + Price > 30W MA + MA rising
     """
     MA_PERIOD   = 150   # 30-week MA in trading days
-    SLOPE_DAYS  = 20    # MA must be rising over this many days
-    WEEKLY_STEP = 5     # resample to weekly for trend chart
+    SLOPE_DAYS  = 50    # MA slope window (10 weeks)
+    SWING_WIN   = 15    # days each side to confirm a swing high/low
+    WEEKLY_STEP = 5
 
     meta_idx = meta.set_index("scrip_code")
     valid_codes = [c for c in price_matrix.columns if c in meta_idx.index]
 
-    # ── Per-stock daily stage classification ──────────────────────────────────
-    print("  → Computing Stage 2 for each stock...")
-    stage_matrix = pd.DataFrame(False, index=price_matrix.index, columns=valid_codes)
-    entry_dates  = {}   # scrip_code → first date in current Stage 2 run
-    weeks_in     = {}   # scrip_code → weeks in Stage 2
-
     bench_aligned = benchmark.reindex(price_matrix.index, method="nearest")
+
+    def find_swings(prices: pd.Series, window: int):
+        """Return lists of (index, value) for swing highs and lows."""
+        highs, lows = [], []
+        vals = prices.values
+        for i in range(window, len(vals) - window):
+            if all(vals[i] >= vals[i-j] and vals[i] >= vals[i+j] for j in range(1, window+1)):
+                highs.append((i, vals[i]))
+            if all(vals[i] <= vals[i-j] and vals[i] <= vals[i+j] for j in range(1, window+1)):
+                lows.append((i, vals[i]))
+        return highs, lows
+
+    def classify_pattern(highs, lows):
+        """Classify based on last 2 swing highs and lows."""
+        if len(highs) < 2 or len(lows) < 2:
+            return "Sideways"
+        hh = highs[-1][1] > highs[-2][1]  # last high > previous high
+        hl = lows[-1][1]  > lows[-2][1]   # last low  > previous low
+        if hh and hl:     return "Uptrend"
+        if not hh and not hl: return "Downtrend"
+        if not hh and hl: return "Contracting"
+        if hh and not hl: return "Volatile"
+        return "Sideways"
+
+    print("  → Computing price patterns (HH/HL swing detection)...")
+    stage_matrix = pd.DataFrame(False, index=price_matrix.index, columns=valid_codes)
+    pattern_map  = {}  # scrip_code → pattern string
 
     for code in valid_codes:
         prices = price_matrix[code].dropna()
         if len(prices) < MA_PERIOD + SLOPE_DAYS:
+            pattern_map[code] = "Sideways"
             continue
 
-        ma = prices.rolling(MA_PERIOD).mean()
-        ma_slope = ma - ma.shift(SLOPE_DAYS)   # positive = rising
+        ma       = prices.rolling(MA_PERIOD).mean()
+        ma_slope = ma.iloc[-1] - ma.iloc[-(SLOPE_DAYS+1)]
 
-        # RS vs benchmark (ratio of normalised prices)
-        bench = bench_aligned.reindex(prices.index, method="nearest")
-        rs = (prices / prices.iloc[0]) / (bench / bench.iloc[0])
-        rs_ma = rs.rolling(MA_PERIOD).mean()
-        rs_improving = rs_ma > rs_ma.shift(SLOPE_DAYS)
+        # Swing detection on full price history
+        highs, lows = find_swings(prices, SWING_WIN)
+        pattern = classify_pattern(highs, lows)
+        pattern_map[code] = pattern
 
-        in_stage2 = (
-            (prices > ma) &          # price above MA
-            (ma_slope > 0) &         # MA rising
-            (rs_improving)           # RS improving
-        ).fillna(False)
+        # Stage 2 (legacy) = Uptrend + price > rising MA
+        if pattern == "Uptrend":
+            in_stage2 = (
+                (prices > ma) &
+                (ma - ma.shift(SLOPE_DAYS) > 0)
+            ).fillna(False)
+        else:
+            in_stage2 = pd.Series(False, index=prices.index)
 
         stage_matrix.loc[in_stage2.index, code] = in_stage2
 
@@ -2518,9 +2999,7 @@ def compute_stage2(price_matrix: pd.DataFrame, benchmark: pd.Series,
         if not today_stage.get(code, False):
             continue
         m = meta_idx.loc[code]
-        # Count consecutive days in Stage 2 (current run)
         col = stage_matrix[code]
-        # Find start of current Stage 2 run
         rev = col[::-1]
         run_len = 0
         for v in rev:
@@ -2528,17 +3007,23 @@ def compute_stage2(price_matrix: pd.DataFrame, benchmark: pd.Series,
             else: break
         weeks_s2 = run_len // 5
 
-        # Entry price
         entry_idx = len(col) - run_len
-        entry_price = price_matrix[code].dropna().iloc[entry_idx] if entry_idx < len(price_matrix[code].dropna()) else None
-        current_price = price_matrix[code].dropna().iloc[-1]
+        prices = price_matrix[code].dropna()
+        entry_price   = prices.iloc[entry_idx] if entry_idx < len(prices) else None
+        current_price = prices.iloc[-1]
         pct_return = round((current_price / entry_price - 1) * 100, 2) if entry_price else 0
 
-        # RS vs benchmark
-        prices = price_matrix[code].dropna()
         bench  = bench_aligned.reindex(prices.index, method="nearest")
         rs_now = (prices.iloc[-1] / prices.iloc[0]) / (bench.iloc[-1] / bench.iloc[0])
         rs_pct = round((rs_now - 1) * 100, 2)
+
+        # Returns for pattern tab
+        ret_1d  = round((prices.iloc[-1] / prices.iloc[-2]  - 1) * 100, 2) if len(prices) >= 2  else 0
+        ret_5d  = round((prices.iloc[-1] / prices.iloc[-6]  - 1) * 100, 2) if len(prices) >= 6  else 0
+        ret_20d = round((prices.iloc[-1] / prices.iloc[-21] - 1) * 100, 2) if len(prices) >= 21 else 0
+
+        ma = prices.rolling(MA_PERIOD).mean()
+        above_ma = bool(prices.iloc[-1] > ma.iloc[-1]) if not pd.isna(ma.iloc[-1]) else False
 
         stocks_out[str(code)] = {
             "ticker":       m.get("ticker", ""),
@@ -2550,9 +3035,66 @@ def compute_stage2(price_matrix: pd.DataFrame, benchmark: pd.Series,
             "pct_return":   pct_return,
             "rs_pct":       rs_pct,
             "in_stage2":    True,
+            "pattern":      pattern_map.get(code, "Sideways"),
+            "above_ma":     above_ma,
+            "ret_1d":       ret_1d,
+            "ret_5d":       ret_5d,
+            "ret_20d":      ret_20d,
         }
 
-    # ── New entries / exits this week ─────────────────────────────────────────
+    # ── All stocks for pattern tab ────────────────────────────────────────────
+    all_stocks = {}
+    for code in valid_codes:
+        m      = meta_idx.loc[code]
+        prices = price_matrix[code].dropna()
+        if len(prices) < 2: continue
+        ma     = prices.rolling(MA_PERIOD).mean()
+        above_ma = bool(prices.iloc[-1] > ma.iloc[-1]) if not pd.isna(ma.iloc[-1]) else False
+        ret_1d  = round((prices.iloc[-1] / prices.iloc[-2]  - 1) * 100, 2) if len(prices) >= 2  else 0
+        ret_5d  = round((prices.iloc[-1] / prices.iloc[-6]  - 1) * 100, 2) if len(prices) >= 6  else 0
+        ret_20d = round((prices.iloc[-1] / prices.iloc[-21] - 1) * 100, 2) if len(prices) >= 21 else 0
+        all_stocks[str(code)] = {
+            "ticker":    m.get("ticker", ""),
+            "company":   m.get("scrip_name", ""),
+            "isubgroup": m.get("isubgroup", ""),
+            "igroup":    m.get("igroup", ""),
+            "sector":    m.get("sector", ""),
+            "mktcap_cr": round(float(m.get("mktcap_cr", 0)), 2),
+            "pattern":   pattern_map.get(code, "Sideways"),
+            "above_ma":  above_ma,
+            "ret_1d":    ret_1d,
+            "ret_5d":    ret_5d,
+            "ret_20d":   ret_20d,
+        }
+
+    # ── Pattern counts per ISubGroup ──────────────────────────────────────────
+    PATTERNS = ["Uptrend", "Contracting", "Sideways", "Downtrend", "Volatile"]
+    industry_pattern = {}
+    for code in valid_codes:
+        ig  = meta_idx.loc[code].get("isubgroup", "")
+        igr = meta_idx.loc[code].get("igroup", "")
+        if not ig: continue
+        if ig not in industry_pattern:
+            industry_pattern[ig] = {"igroup": igr, **{p: 0 for p in PATTERNS}, "total": 0}
+        pat = pattern_map.get(code, "Sideways")
+        industry_pattern[ig][pat] += 1
+        industry_pattern[ig]["total"] += 1
+
+    # Add dominant pattern
+    for ig, v in industry_pattern.items():
+        v["dominant"] = max(PATTERNS, key=lambda p: v[p])
+
+    # ── Legacy industry_pct (for existing Stage 2 tab) ────────────────────────
+    industry_pct = {
+        ig: {
+            "total":  v["total"],
+            "stage2": v.get("Uptrend", 0),
+            "pct":    round(v.get("Uptrend", 0) / v["total"] * 100, 1) if v["total"] else 0
+        }
+        for ig, v in industry_pattern.items()
+    }
+
+    # ── New entries / exits ───────────────────────────────────────────────────
     new_entries, new_exits = [], []
     for code in valid_codes:
         curr = today_stage.get(code, False)
@@ -2570,49 +3112,31 @@ def compute_stage2(price_matrix: pd.DataFrame, benchmark: pd.Series,
             rs_pct = round(((prices.iloc[-1]/prices.iloc[0]) / (bench.iloc[-1]/bench.iloc[0]) - 1) * 100, 2)
             new_entries.append({**base, "rs_pct": rs_pct})
         elif prev and not curr:
-            # Weeks it was in Stage 2
             col = stage_matrix[code]
             wks = sum(1 for v in col[-30:] if v) // 5
             prices = price_matrix[code].dropna()
             pct = round((prices.iloc[-1] / prices.iloc[-6] - 1) * 100, 2) if len(prices) >= 6 else 0
             new_exits.append({**base, "weeks_in_s2": wks, "pct_return": pct})
 
-    # ── Industry % in Stage 2 ─────────────────────────────────────────────────
-    all_by_industry = {}
-    for code in valid_codes:
-        ig = meta_idx.loc[code].get("isubgroup", "")
-        if not ig: continue
-        if ig not in all_by_industry:
-            all_by_industry[ig] = {"total": 0, "stage2": 0}
-        all_by_industry[ig]["total"] += 1
-        if today_stage.get(code, False):
-            all_by_industry[ig]["stage2"] += 1
-
-    industry_pct = {
-        ig: {
-            "total":   v["total"],
-            "stage2":  v["stage2"],
-            "pct":     round(v["stage2"] / v["total"] * 100, 1) if v["total"] else 0
-        }
-        for ig, v in all_by_industry.items()
-    }
-
-    total_s2 = today_stage.sum()
+    # ── Summary counts ────────────────────────────────────────────────────────
+    pat_summary = {p: sum(1 for c in valid_codes if pattern_map.get(c) == p) for p in PATTERNS}
+    total_s2    = today_stage.sum()
     total_stocks = len(valid_codes)
-    print(f"  ✓ Stage 2 stocks today: {total_s2}/{total_stocks} ({round(total_s2/total_stocks*100,1)}%)")
-    print(f"  ✓ New entries this week: {len(new_entries)} | New exits: {len(new_exits)}")
+
+    print(f"  ✓ Patterns — Uptrend:{pat_summary['Uptrend']} Contracting:{pat_summary['Contracting']} Sideways:{pat_summary['Sideways']} Downtrend:{pat_summary['Downtrend']} Volatile:{pat_summary['Volatile']}")
+    print(f"  ✓ Stage 2 (Uptrend + above rising MA): {total_s2}/{total_stocks}")
 
     return {
-        "weekly_counts": {
-            d.strftime("%Y-%m-%d"): int(c)
-            for d, c in weekly_counts.items()
-        },
-        "stocks":       stocks_out,
-        "industry_pct": industry_pct,
-        "new_entries":  sorted(new_entries, key=lambda x: -x.get("mktcap_cr", 0)),
-        "new_exits":    sorted(new_exits,   key=lambda x: -x.get("mktcap_cr", 0)),
-        "total_stocks": total_stocks,
-        "total_stage2": int(total_s2),
+        "weekly_counts":    {d.strftime("%Y-%m-%d"): int(c) for d, c in weekly_counts.items()},
+        "stocks":           stocks_out,
+        "industry_pct":     industry_pct,
+        "industry_pattern": industry_pattern,
+        "all_stocks":       all_stocks,
+        "pattern_summary":  pat_summary,
+        "new_entries":      sorted(new_entries, key=lambda x: -x.get("mktcap_cr", 0)),
+        "new_exits":        sorted(new_exits,   key=lambda x: -x.get("mktcap_cr", 0)),
+        "total_stocks":     total_stocks,
+        "total_stage2":     int(total_s2),
     }
 
 
