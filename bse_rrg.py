@@ -3,7 +3,7 @@ BSE RRG Dashboard — bse_rrg.py
 ================================
 Single-file script. Run it and a browser dashboard opens automatically.
 
-Author / Owner : Ravi (irtteja)
+Author / Owner : Ravi 
 AI Assistant   : Claude Sonnet 4.6 by Anthropic (claude.ai)
 Last Modified  : 2026-07-07
 
@@ -1562,12 +1562,12 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
                 <th style="width:20px"></th>
                 <th onclick="patSort(\'sg\')">ISubGroup</th>
                 <th onclick="patSort(\'ig\')">IGroup</th>
-                <th onclick="patSort(\'up\')" style="text-align:right;color:#00C853">Uptrend</th>
-                <th onclick="patSort(\'con\')" style="text-align:right;color:#2962FF">Contracting</th>
-                <th onclick="patSort(\'sid\')" style="text-align:right;color:#555">Sideways</th>
-                <th onclick="patSort(\'dn\')" style="text-align:right;color:#D50000">Downtrend</th>
-                <th onclick="patSort(\'vol\')" style="text-align:right;color:#FF6D00">Volatile</th>
-                <th style="text-align:right;color:#555">Dominant</th>
+                <th onclick="patSort(\'Uptrend\')" style="text-align:right;color:#00C853">Uptrend</th>
+                <th onclick="patSort(\'Contracting\')" style="text-align:right;color:#2962FF">Contracting</th>
+                <th onclick="patSort(\'Sideways\')" style="text-align:right;color:#555">Sideways</th>
+                <th onclick="patSort(\'Downtrend\')" style="text-align:right;color:#D50000">Downtrend</th>
+                <th onclick="patSort(\'Volatile\')" style="text-align:right;color:#FF6D00">Volatile</th>
+                <th onclick="patSort(\'dominant\')" style="text-align:right;color:#555;cursor:pointer">Dominant</th>
               </tr></thead>
               <tbody id="pat-tb"></tbody>
             </table>
@@ -2626,13 +2626,43 @@ function renderBreadthTab(){
 }
 
 // ── Pattern Tab ───────────────────────────────────────────────────────────────
-let patReady=false, patSortKey='up', patSortDir=-1;
+let patReady=false, patSortKey='Uptrend', patSortDir=-1;
 const PAT_C2={Uptrend:'#00C853',Contracting:'#2962FF',Sideways:'#555',Downtrend:'#D50000',Volatile:'#FF6D00'};
 const PAT_BG2={Uptrend:'#00C85322',Contracting:'#2962FF22',Sideways:'#33333322',Downtrend:'#D5000022',Volatile:'#FF6D0022'};
 const PAT_RANK={Uptrend:0,Contracting:1,Sideways:2,Downtrend:3,Volatile:4};
 
 function patBadge(p){return `<span style="font-size:10px;padding:2px 7px;border-radius:10px;font-weight:500;background:${PAT_BG2[p]||'#33333322'};color:${PAT_C2[p]||'#888'}">${p||'—'}</span>`;}
 function patRet(v){const c=v>=0?'#00C853':'#D50000';return `<span style="color:${c};font-weight:500">${v>=0?'+':''}${v.toFixed(2)}%</span>`;}
+
+const stkSortState={};
+function renderStkRows(stocks){
+  return stocks.map(s=>`<tr>
+    <td style="padding:5px 8px;color:#90CAF9;font-weight:500">${s.company||s.ticker}</td>
+    <td style="padding:5px 8px">${patBadge(s.pattern)}</td>
+    <td style="padding:5px 8px;font-size:10px;color:#555">${s.above_ma?'Above':'Below'} 30W MA</td>
+    <td style="padding:5px 8px;text-align:right">${patRet(s.ret_1d||0)}</td>
+    <td style="padding:5px 8px;text-align:right">${patRet(s.ret_5d||0)}</td>
+    <td style="padding:5px 8px;text-align:right">${patRet(s.ret_20d||0)}</td>
+  </tr>`).join('');
+}
+function patStkSort(tableId, key){
+  const state=stkSortState[tableId]||{k:'company',d:1};
+  const dir=state.k===key?-state.d:-1;
+  stkSortState[tableId]={k:key,d:dir};
+  const tb=document.getElementById(tableId+'-tb');
+  if(!tb) return;
+  const rows=[...tb.querySelectorAll('tr')];
+  rows.sort((a,b)=>{
+    const cells={'company':0,'pattern':1,'ret_1d':3,'ret_5d':4,'ret_20d':5};
+    const ci=cells[key]??0;
+    const av=a.cells[ci]?.textContent.trim()||'';
+    const bv=b.cells[ci]?.textContent.trim()||'';
+    const an=parseFloat(av), bn=parseFloat(bv);
+    if(!isNaN(an)&&!isNaN(bn)) return dir*(an-bn);
+    return dir*av.localeCompare(bv);
+  });
+  rows.forEach(r=>tb.appendChild(r));
+}
 
 function patSort(k){if(patSortKey===k)patSortDir*=-1;else{patSortKey=k;patSortDir=-1;}renderPat();}
 
@@ -2710,26 +2740,20 @@ function renderPat(){
       <td style="padding:7px 8px;text-align:right">${patBadge(r.dominant)}</td>`;
 
     const stocks=(stocksBySG[r.sg]||[]).sort((a,b)=>PAT_RANK[a.pattern]-PAT_RANK[b.pattern]);
+    const sgId='stk-'+i;
     const stkHtml=stocks.length?`
       <div style="padding:10px 14px 12px 28px;background:#0d0d1a">
         <div style="font-size:10px;color:#555;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">${r.sg} — stocks</div>
-        <table style="width:100%;border-collapse:collapse;font-size:11px">
+        <table style="width:100%;border-collapse:collapse;font-size:11px" id="${sgId}">
           <thead><tr>
-            <th style="padding:4px 8px;font-size:9px;color:#555;text-align:left;border-bottom:0.5px solid #1e1e30">Stock</th>
-            <th style="padding:4px 8px;font-size:9px;color:#555;text-align:left;border-bottom:0.5px solid #1e1e30">Pattern</th>
+            <th style="padding:4px 8px;font-size:9px;color:#555;text-align:left;border-bottom:0.5px solid #1e1e30;cursor:pointer" onclick="patStkSort('${sgId}','company')">Stock ↕</th>
+            <th style="padding:4px 8px;font-size:9px;color:#555;text-align:left;border-bottom:0.5px solid #1e1e30;cursor:pointer" onclick="patStkSort('${sgId}','pattern')">Pattern ↕</th>
             <th style="padding:4px 8px;font-size:9px;color:#555;text-align:left;border-bottom:0.5px solid #1e1e30">MA</th>
-            <th style="padding:4px 8px;font-size:9px;color:#90CAF9;text-align:right;border-bottom:0.5px solid #1e1e30">Daily</th>
-            <th style="padding:4px 8px;font-size:9px;color:#FFD740;text-align:right;border-bottom:0.5px solid #1e1e30">Weekly</th>
-            <th style="padding:4px 8px;font-size:9px;color:#FF6D00;text-align:right;border-bottom:0.5px solid #1e1e30">Monthly</th>
+            <th style="padding:4px 8px;font-size:9px;color:#90CAF9;text-align:right;border-bottom:0.5px solid #1e1e30;cursor:pointer" onclick="patStkSort('${sgId}','ret_1d')">1D ↕</th>
+            <th style="padding:4px 8px;font-size:9px;color:#FFD740;text-align:right;border-bottom:0.5px solid #1e1e30;cursor:pointer" onclick="patStkSort('${sgId}','ret_5d')">5D ↕</th>
+            <th style="padding:4px 8px;font-size:9px;color:#FF6D00;text-align:right;border-bottom:0.5px solid #1e1e30;cursor:pointer" onclick="patStkSort('${sgId}','ret_20d')">20D ↕</th>
           </tr></thead>
-          <tbody>${stocks.map(s=>`<tr>
-            <td style="padding:5px 8px;color:#90CAF9;font-weight:500">${s.company||s.ticker}</td>
-            <td style="padding:5px 8px">${patBadge(s.pattern)}</td>
-            <td style="padding:5px 8px;font-size:10px;color:#555">${s.above_ma?'Above':'Below'} 30W MA</td>
-            <td style="padding:5px 8px;text-align:right">${patRet(s.ret_1d||0)}</td>
-            <td style="padding:5px 8px;text-align:right">${patRet(s.ret_5d||0)}</td>
-            <td style="padding:5px 8px;text-align:right">${patRet(s.ret_20d||0)}</td>
-          </tr>`).join('')}</tbody>
+          <tbody id="${sgId}-tb">${renderStkRows(stocks)}</tbody>
         </table>
       </div>`:'<div style="padding:10px 28px;font-size:11px;color:#555">No stocks match current filters</div>';
 
