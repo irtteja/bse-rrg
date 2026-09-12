@@ -651,7 +651,8 @@ def build_quadrant_table(price_matrix: pd.DataFrame, benchmark: pd.Series,
             "scrip_code":    code,
             "ticker":        m.get("ticker", ""),
             "company":       m.get("scrip_name", ""),
-            "igroup":        isg,
+            "igroup":        m.get("igroup", ""),
+            "isubgroup":     isg,
             "sector":        m.get("sector", ""),
             "mktcap_cr":     m.get("mktcap_cr", 0),
             # vs BSE500
@@ -739,13 +740,12 @@ def build_dashboard(rrg_data: dict, igroup_indices: pd.DataFrame,
 
     if not stock_df.empty:
         # Join meta to get L3 igroup label
-        meta_map = universe.set_index("scrip_code")[["igroup"]].rename(columns={"igroup": "igroup_l3"})
-        stock_export = stock_df.join(meta_map, on="scrip_code", how="left")
+        stock_export = stock_df.copy()
         stocks_list = stock_export[[
-            "scrip_code", "ticker", "company", "igroup", "igroup_l3", "sector",
+            "scrip_code", "ticker", "company", "igroup", "isubgroup", "sector",
             "mktcap_cr", "rs_ratio", "rs_momentum", "quadrant",
             "rs_ratio_sg", "rs_momentum_sg", "quadrant_sg"
-        ]].rename(columns={"igroup": "isubgroup", "igroup_l3": "igroup"}).to_dict(orient="records")
+        ]].to_dict(orient="records")
 
         # Add weekly price series per stock (normalised to 100, vs BSE500 and vs ISubGroup)
         # Resample to weekly to keep JSON size manageable
@@ -1275,12 +1275,6 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
         <select id="rot-sg" onchange="onRotSGChange()" style="max-width:160px"><option value="">All</option></select>
         <label>Search:</label>
         <input class="srch" id="rot-srch" placeholder="Ticker / company…" oninput="renderRot()" style="width:140px">
-        <label style="margin-left:auto">Q vs:</label>
-        <select id="rot-mode" onchange="renderRot()">
-          <option value="bse500">BSE500</option>
-          <option value="sector">Sector</option>
-          <option value="both">Both</option>
-        </select>
         <label>52W:</label>
         <select id="rot-view" onchange="renderRot()">
           <option value="quadrant">— None —</option>
@@ -1313,7 +1307,7 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
                 <th onclick="rotSort('leading','mktcap_cr')">MCap</th>
                 <th onclick="rotSort('leading','rs_ratio')">RS-R</th>
                 <th onclick="rotSort('leading','rs_momentum')">RS-M</th>
-                <th>SG-Q</th>
+                <th>Sectoral</th>
                 <th id="rot-52w-hdr-leading" style="display:none;white-space:nowrap;cursor:pointer" onclick="rotSort('leading','pct52')">% 52W</th>
               </tr></thead><tbody id="rot-leading-tb"></tbody></table>
             </div>
@@ -1329,7 +1323,7 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
                 <th onclick="rotSort('improving','mktcap_cr')">MCap</th>
                 <th onclick="rotSort('improving','rs_ratio')">RS-R</th>
                 <th onclick="rotSort('improving','rs_momentum')">RS-M</th>
-                <th>SG-Q</th>
+                <th>Sectoral</th>
                 <th id="rot-52w-hdr-improving" style="display:none;white-space:nowrap;cursor:pointer" onclick="rotSort('improving','pct52')">% 52W</th>
               </tr></thead><tbody id="rot-improving-tb"></tbody></table>
             </div>
@@ -1345,7 +1339,7 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
                 <th onclick="rotSort('weakening','mktcap_cr')">MCap</th>
                 <th onclick="rotSort('weakening','rs_ratio')">RS-R</th>
                 <th onclick="rotSort('weakening','rs_momentum')">RS-M</th>
-                <th>SG-Q</th>
+                <th>Sectoral</th>
                 <th id="rot-52w-hdr-weakening" style="display:none;white-space:nowrap;cursor:pointer" onclick="rotSort('weakening','pct52')">% 52W</th>
               </tr></thead><tbody id="rot-weakening-tb"></tbody></table>
             </div>
@@ -1361,7 +1355,7 @@ tbody td{padding:6px 8px;border-bottom:1px solid #141428}
                 <th onclick="rotSort('lagging','mktcap_cr')">MCap</th>
                 <th onclick="rotSort('lagging','rs_ratio')">RS-R</th>
                 <th onclick="rotSort('lagging','rs_momentum')">RS-M</th>
-                <th>SG-Q</th>
+                <th>Sectoral</th>
                 <th id="rot-52w-hdr-lagging" style="display:none;white-space:nowrap;cursor:pointer" onclick="rotSort('lagging','pct52')">% 52W</th>
               </tr></thead><tbody id="rot-lagging-tb"></tbody></table>
             </div>
@@ -2122,7 +2116,7 @@ function rotSort(quad,k){
 function renderRot(){
   const sgf=document.getElementById('rot-sg').value;
   const q=(document.getElementById('rot-srch').value||'').toLowerCase();
-  const mode=document.getElementById('rot-mode')?.value||'bse500';
+  const mode='bse500';
   const igf=document.getElementById('rot-ig').value;
   const view=document.getElementById('rot-view')?.value||'quadrant';
 
@@ -2166,9 +2160,7 @@ function renderRot(){
     const {k,d}=rotSorts[quad];
 
     const rows=stocks.filter(s=>{
-      if(mode==='sector') return (s.quadrant_sg||'')=== Quad;
-      if(mode==='both')   return (s.quadrant||'')=== Quad && (s.quadrant_sg||'')=== Quad;
-      return (s.quadrant||'')=== Quad;
+      if(mode==='bse500') return (s.quadrant||'')=== Quad;
     }).filter(s=>{
       if(!show52) return true;
       const p=pct52Map[s.scrip_code];
