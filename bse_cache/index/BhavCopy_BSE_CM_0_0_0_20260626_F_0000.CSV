@@ -15,10 +15,33 @@
       content="default-src  https://*.googlesyndication.com  'self';  img-src *.gstatic.com *.google.com 'self' data: chrome-extension-resource storage.googleapis.com pagead2.googlesyndication.com;script-src 'strict-dynamic' 'self' 'nonce-appcomponents123456789'; connect-src * data; style-src 'nonce-appcomponents123456789'  'self' data: chrome-extension-resource:  pagead2.googlesyndication.com     storage.googleapis.com googleads.g.doubleclick.net ajax.googleapis.com; frame-src 'self' data: chrome-extension-resource:;font-src *.gstatic.com *.google.com 'self'      data: chrome-extension-resource: *.gstatic.com *.google.com fonts.googleapis.com; frame-ancestors 'self';      object-src 'none';              media-src * data; base-uri 'self'; "
     /> -->
     <link rel="icon" type="image/x-icon" href="/assets/includenew/images/bselogo.png">
+
+    <!-- Primary SEO Meta Tags -->
+    <meta name="description" content="Get live BSE SENSEX updates, real-time stock prices, market indices, company news, results, IPO information, corporate announcements, and derivatives data.">
+    <meta name="keywords" content="BSE, BSE India, Bombay Stock Exchange, SENSEX today, live stock prices, Indian stock market, share market news, IPO, IPO listings, equity market, company news, company results, corporate announcements, currency derivatives, commodity derivatives, bonds, mutual funds">
+    <link rel="canonical" href="https://www.bseindia.com/">
+    <!-- Open Graph Meta Tags -->
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="BSE India">
+    <meta property="og:url" content="https://www.bseindia.com/">
+    <meta property="og:title" content="BSE India | Live SENSEX, Stock Prices and Market Updates">
+    <meta property="og:description" content="Get live BSE SENSEX updates, real-time stock prices, market indices, company news, IPO information, and corporate announcements.">
+    <meta property="og:image" content="https://www.bseindia.com/include/images/bselogo.png">
+    <meta property="og:image:alt" content="BSE India logo">
+    <meta property="og:locale" content="en_IN">
+    <!-- Twitter / X Meta Tags -->
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:site" content="@bseindiacom">
+    <meta name="twitter:creator" content="@bseindiateam">
+    <meta name="twitter:url" content="https://www.bseindia.com/">
+    <meta name="twitter:title" content="BSE India | Live SENSEX, Stock Prices and Market Updates">
+    <meta name="twitter:description" content="Get live BSE SENSEX updates, real-time stock prices, market indices, company news, IPO information, and corporate announcements.">
+    <meta name="twitter:image" content="https://www.bseindia.com/include/images/bselogo.png">
+    <meta name="twitter:image:alt" content="BSE India logo">
+
     <link rel="dns-prefetch" href="https://api.bseindia.com">
     <link rel="dns-prefetch" href="https://cdn-pub.sentifi.com">
     <link rel="dns-prefetch" href="https://tpc.googlesyndication.com">
-    <link rel="dns-prefetch" href="https://i.marketsmojo.com">
     <link rel="dns-prefetch" href="https://fonts.gstatic.com">
     <link rel="dns-prefetch" href="https://www.google-analytics.com">
     <link rel="dns-prefetch" href="https://www.googletagmanager.com">
@@ -71,6 +94,6 @@
   <body>
     <app ngcspnonce="appcomponents123456789"></app>
     <app-root></app-root>
-  <link rel="modulepreload" href="/assets/includenew/js/chunk-HZ6DIDSH.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-C5YUUC6S.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-YGPX6HRI.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-S3LLBHV5.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-UCHGZLN4.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-FSJ7ENSH.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-VSOVBR5A.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-GMHXU7KM.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-IS3H6PXD.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-AKQPE63N.js"><script src="/assets/includenew/js/polyfills-MH2GNY63.js" type="module" nonce="appcomponents123456789"></script><script src="/assets/includenew/js/scripts-DS3I3X7Y.js" defer="" nonce="appcomponents123456789"></script><script src="/assets/includenew/js/main-UOFMHHHR.js" type="module" nonce="appcomponents123456789"></script>
+  <link rel="modulepreload" href="/assets/includenew/js/chunk-HZ6DIDSH.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-C5YUUC6S.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-YGPX6HRI.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-S3LLBHV5.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-UCHGZLN4.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-FSJ7ENSH.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-VSOVBR5A.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-GMHXU7KM.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-IS3H6PXD.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-AKQPE63N.js"><script src="/assets/includenew/js/polyfills-MH2GNY63.js" type="module" nonce="appcomponents123456789"></script><script src="/assets/includenew/js/scripts-DS3I3X7Y.js" defer="" nonce="appcomponents123456789"></script><script src="/assets/includenew/js/main-FYWFROIJ.js" type="module" nonce="appcomponents123456789"></script>
 
 </body></html>
