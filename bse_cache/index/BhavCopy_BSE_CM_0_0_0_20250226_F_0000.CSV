@@ -39,6 +39,18 @@
     <meta name="twitter:image" content="https://www.bseindia.com/include/images/bselogo.png">
     <meta name="twitter:image:alt" content="BSE India logo">
 
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" sizes="16x16" href="/assets/includenew/images/favicon_io/favicon-16x16.png">
+
+    <link rel="icon" type="image/png" sizes="32x32" href="/assets/includenew/images/favicon_io/favicon-32x32.png">
+
+    <link rel="apple-touch-icon" sizes="180x180" href="/assets/includenew/images/favicon_io/apple-touch-icon.png">
+
+    <link rel="icon" type="image/png" sizes="192x192" href="/assets/includenew/images/favicon_io/android-chrome-192x192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/assets/includenew/images/favicon_io/android-chrome-512x512.png">
+
+    <link rel="manifest" href="/assets/includenew/images/favicon_io/site.webmanifest">
+
     <link rel="dns-prefetch" href="https://api.bseindia.com">
     <link rel="dns-prefetch" href="https://cdn-pub.sentifi.com">
     <link rel="dns-prefetch" href="https://tpc.googlesyndication.com">
@@ -94,6 +106,6 @@
   <body>
     <app ngcspnonce="appcomponents123456789"></app>
     <app-root></app-root>
-  <link rel="modulepreload" href="/assets/includenew/js/chunk-HZ6DIDSH.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-C5YUUC6S.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-YGPX6HRI.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-S3LLBHV5.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-UCHGZLN4.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-FSJ7ENSH.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-VSOVBR5A.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-GMHXU7KM.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-IS3H6PXD.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-AKQPE63N.js"><script src="/assets/includenew/js/polyfills-MH2GNY63.js" type="module" nonce="appcomponents123456789"></script><script src="/assets/includenew/js/scripts-DS3I3X7Y.js" defer="" nonce="appcomponents123456789"></script><script src="/assets/includenew/js/main-FYWFROIJ.js" type="module" nonce="appcomponents123456789"></script>
+  <link rel="modulepreload" href="/assets/includenew/js/chunk-HZ6DIDSH.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-EMLZU4ZX.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-ZO4WLC5U.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-IKTKVV6P.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-UCHGZLN4.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-FSJ7ENSH.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-VSOVBR5A.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-GMHXU7KM.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-IS3H6PXD.js"><link rel="modulepreload" href="/assets/includenew/js/chunk-AKQPE63N.js"><script src="/assets/includenew/js/polyfills-MH2GNY63.js" type="module" nonce="appcomponents123456789"></script><script src="/assets/includenew/js/scripts-DS3I3X7Y.js" defer="" nonce="appcomponents123456789"></script><script src="/assets/includenew/js/main-NYXWOXBN.js" type="module" nonce="appcomponents123456789"></script>
 
 </body></html>
